@@ -19,6 +19,41 @@ class XUnfollowApp {
     }
     
     
+    updateOperationTimer(operationId, startTime) {
+        // Update timer display for running operations
+        const timerEl = document.getElementById(`timer-${operationId}`);
+        if (!timerEl || !startTime) return;
+        
+        const updateTimer = () => {
+            const now = new Date();
+            const start = new Date(startTime);
+            const elapsed = Math.floor((now - start) / 1000);
+            
+            const hours = Math.floor(elapsed / 3600);
+            const minutes = Math.floor((elapsed % 3600) / 60);
+            const seconds = elapsed % 60;
+            
+            let timeString = '';
+            if (hours > 0) {
+                timeString = `${hours}h ${minutes}m ${seconds}s elapsed`;
+            } else if (minutes > 0) {
+                timeString = `${minutes}m ${seconds}s elapsed`;
+            } else {
+                timeString = `${seconds}s elapsed`;
+            }
+            
+            timerEl.textContent = `Running: ${timeString}`;
+        };
+        
+        // Update immediately and then every second
+        updateTimer();
+        const timerId = setInterval(updateTimer, 1000);
+        
+        // Store timer ID for cleanup
+        if (!this.operationTimers) this.operationTimers = {};
+        this.operationTimers[operationId] = timerId;
+    }
+    
     saveCSVListToStorage() {
         // Save CSV list to localStorage for persistence
         try {
@@ -60,6 +95,9 @@ class XUnfollowApp {
         this.checkAuthStatus();
         this.loadSlowBatchOperations();
         this.loadCSVListFromStorage();
+        // No event stream needed - using completion notifications instead
+        
+        // Login status checking removed - was causing API rate limit waste
         
         // Check for URL parameters (error messages from OAuth)
         const urlParams = new URLSearchParams(window.location.search);
@@ -74,11 +112,7 @@ class XUnfollowApp {
     }
     
     bindEvents() {
-        // Single unfollow form
-        const singleForm = document.getElementById('single-unfollow-form');
-        if (singleForm) {
-            singleForm.addEventListener('submit', (e) => this.handleSingleUnfollow(e));
-        }
+        // Single unfollow form removed
         
         // CSV file input
         const csvInput = document.getElementById('csv-file-input');
@@ -94,15 +128,11 @@ class XUnfollowApp {
         if (selectNoneBtn) selectNoneBtn.addEventListener('click', () => this.selectNone());
         if (clearCSVBtn) clearCSVBtn.addEventListener('click', () => this.clearCSVList());
         
-        // Realistic batch buttons
-        const testBatchBtn = document.getElementById('test-batch-btn');
+        // Batch button
         const regularBatchBtn = document.getElementById('regular-batch-btn');
-        if (testBatchBtn) testBatchBtn.addEventListener('click', () => this.handleRealisticBatch('test'));
-        if (regularBatchBtn) regularBatchBtn.addEventListener('click', () => this.handleRealisticBatch('regular'));
+        if (regularBatchBtn) regularBatchBtn.addEventListener('click', () => this.handleBatchUnfollow());
         
-        // Debug text extraction button
-        const extractBtn = document.getElementById('extract-usernames-btn');
-        if (extractBtn) extractBtn.addEventListener('click', () => this.handleExtractUsernames());
+        // Extract usernames button removed
         
         // Kept for backward compatibility with existing operations
         const slowBatch15minBtn = document.getElementById('slow-batch-15min-btn');
@@ -110,8 +140,10 @@ class XUnfollowApp {
         
         // Refresh operations button
         const refreshOpsBtn = document.getElementById('refresh-operations-btn');
-        if (refreshOpsBtn) refreshOpsBtn.addEventListener('click', () => this.loadSlowBatchOperations());
+        if (refreshOpsBtn) refreshOpsBtn.addEventListener('click', () => this.manualRefresh());
     }
+    
+    // Login status checking removed - was causing unnecessary API calls
     
     async checkAuthStatus() {
         try {
@@ -119,10 +151,38 @@ class XUnfollowApp {
             const data = await response.json();
             
             if (data.authenticated) {
-                document.getElementById('username-display').textContent = data.username || 'User';
+                const userInfoSection = document.getElementById('user-info-section');
+                const userInfoLoading = document.getElementById('user-info-loading');
+                
+                const displayName = data.username || 'User';
+                const displayId = data.user_id || 'Loading...';
+                const userDisplayName = data.display_name || displayName;
+                
+                // Check if we have real user data or just placeholders
+                const hasRealData = displayName !== 'User' && displayId !== 'authenticated';
+                
+                if (hasRealData) {
+                    // Show display name only
+                    const displayNameEl = document.getElementById('display-name');
+                    if (displayNameEl) {
+                        displayNameEl.textContent = userDisplayName || displayName;
+                    }
+                    
+                    if (userInfoSection) userInfoSection.classList.remove('d-none');
+                    if (userInfoLoading) userInfoLoading.classList.add('d-none');
+                } else {
+                    // Hide user info and show loading message
+                    if (userInfoSection) userInfoSection.classList.add('d-none');
+                    if (userInfoLoading) userInfoLoading.classList.remove('d-none');
+                    
+                    // Timer functionality removed to prevent API waste"
+                }
+                
                 if (data.rate_limits) {
                     this.updateRateLimitDisplay(data.rate_limits);
                 }
+                
+                // Rate limit message handling simplified - removed complex UI updates
             }
         } catch (error) {
             console.error('Error checking auth status:', error);
@@ -130,6 +190,8 @@ class XUnfollowApp {
     }
     
     async loadRateLimits() {
+        // Only load initial rate limits on startup - don't make additional API calls
+        // Rate limits will be updated after actual unfollow operations
         try {
             const response = await fetch('/status');
             const data = await response.json();
@@ -139,7 +201,7 @@ class XUnfollowApp {
                 this.updateRateLimitDisplay(data.rate_limits);
             }
         } catch (error) {
-            console.error('Error loading rate limits:', error);
+            console.error('Error loading initial rate limits:', error);
         }
     }
     
@@ -151,12 +213,15 @@ class XUnfollowApp {
         if (unfollowHourEl && rateLimits.unfollow_hourly) {
             const remaining = rateLimits.unfollow_hourly.remaining;
             const limit = rateLimits.unfollow_hourly.limit;
+            const resetTime = rateLimits.unfollow_hourly.reset_time;
             
             if (remaining === 'unknown' || limit === 'unknown') {
-                unfollowHourEl.textContent = 'Loading...';
+                unfollowHourEl.textContent = 'No data';
                 unfollowHourEl.className = 'badge bg-secondary';
             } else {
+                const resetText = this.formatResetTime(resetTime);
                 unfollowHourEl.textContent = `${remaining}/${limit}`;
+                unfollowHourEl.title = `Resets ${resetText}`;
                 unfollowHourEl.className = `badge ${remaining > 2 ? 'bg-success' : remaining > 0 ? 'bg-warning' : 'bg-danger'}`;
             }
         }
@@ -165,177 +230,50 @@ class XUnfollowApp {
         if (unfollowDayEl && rateLimits.unfollow_daily) {
             const remaining = rateLimits.unfollow_daily.remaining;
             const limit = rateLimits.unfollow_daily.limit;
+            const resetTime = rateLimits.unfollow_daily.reset_time;
             
             if (remaining === 'unknown' || limit === 'unknown') {
-                unfollowDayEl.textContent = 'Loading...';
+                unfollowDayEl.textContent = 'No data';
                 unfollowDayEl.className = 'badge bg-secondary';
             } else {
+                const resetText = this.formatResetTime(resetTime);
                 unfollowDayEl.textContent = `${remaining}/${limit}`;
+                unfollowDayEl.title = `Resets ${resetText}`;
                 unfollowDayEl.className = `badge ${remaining > 10 ? 'bg-success' : remaining > 0 ? 'bg-warning' : 'bg-danger'}`;
             }
         }
     }
-    
-    async handleSingleUnfollow(event) {
-        event.preventDefault();
+
+    formatResetTime(resetTimestamp) {
+        if (!resetTimestamp) return 'unknown';
         
-        if (this.isProcessing) return;
+        const now = Math.floor(Date.now() / 1000);
+        const timeDiff = resetTimestamp - now;
         
-        const usernameInput = document.getElementById('username-input');
-        const target = usernameInput.value.trim();
+        if (timeDiff <= 0) return 'now';
         
-        if (!target) {
-            this.showStatus('warning', 'Please enter a username or user ID');
-            return;
-        }
+        const hours = Math.floor(timeDiff / 3600);
+        const minutes = Math.floor((timeDiff % 3600) / 60);
         
-        this.isProcessing = true;
-        this.setButtonState('single-unfollow-btn', true, 'Unfollowing...');
-        this.showStatus('info', `Attempting to unfollow @${target}...`);
-        
-        try {
-            const response = await fetch('/unfollow/single', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ target })
-            });
-            
-            const data = await response.json();
-            
-            if (response.ok && data.success) {
-                this.showStatus('success', data.message);
-                usernameInput.value = '';
-                this.loadRateLimits(); // Update rate limits
-                this.removeUsernameFromList(target); // Remove from list if present
-            } else {
-                this.showStatus('error', data.error || 'Unfollow failed');
-            }
-        } catch (error) {
-            console.error('Single unfollow error:', error);
-            this.showStatus('error', 'Network error occurred');
-        } finally {
-            this.isProcessing = false;
-            this.setButtonState('single-unfollow-btn', false, '<i class=\"fas fa-user-minus me-2\"></i>Unfollow User');
+        if (hours > 0) {
+            return `in ${hours}h ${minutes}m`;
+        } else {
+            return `in ${minutes}m`;
         }
     }
     
-    handleExtractUsernames() {
-        console.log('🔍 handleExtractUsernames called!'); // Debug - check if function is called
-        
-        const textInput = document.getElementById('debug-text-input');
-        const extractedCountEl = document.getElementById('extracted-count');
-        const extractedNumberEl = document.getElementById('extracted-number');
-        
-        console.log('Elements found:', { textInput: !!textInput, extractedCountEl: !!extractedCountEl, extractedNumberEl: !!extractedNumberEl }); // Debug
-        
-        if (!textInput) {
-            console.error('debug-text-input element not found!');
-            return;
-        }
-        
-        const text = textInput.value.trim();
-        if (!text) {
-            this.showStatus('warning', 'Please paste some text from X following page');
-            return;
-        }
-        
-        this.showStatus('info', 'Extracting usernames from pasted text...');
-        
-        try {
-            const usernames = this.extractUsernamesFromText(text);
-            console.log('Extracted usernames:', usernames); // Debug logging
-            
-            if (usernames.length === 0) {
-                this.showStatus('warning', 'No valid @usernames found in the text');
-                if (extractedCountEl) extractedCountEl.classList.add('d-none');
-                return;
-            }
-            
-            // Add extracted usernames to CSV list
-            const newUsers = usernames.map((username, index) => ({
-                id: `extract_${Date.now()}_${index}`,
-                username: username,
-                source: 'extracted'
-            }));
-            
-            console.log('New users to add:', newUsers); // Debug
-            
-            // Merge with existing CSV list, avoiding duplicates
-            const existingUsernames = new Set(this.csvUserList.map(u => u.username));
-            const uniqueNewUsers = newUsers.filter(u => !existingUsernames.has(u.username));
-            
-            console.log('Unique new users after dedup:', uniqueNewUsers); // Debug
-            console.log('CSV list before:', this.csvUserList.length); // Debug
-            
-            this.csvUserList = [...this.csvUserList, ...uniqueNewUsers];
-            
-            console.log('CSV list after:', this.csvUserList.length); // Debug
-            
-            this.renderCSVList();
-            this.saveCSVListToStorage();
-            
-            // Update extracted count display
-            if (extractedCountEl && extractedNumberEl) {
-                extractedNumberEl.textContent = usernames.length;
-                extractedCountEl.classList.remove('d-none');
-            }
-            
-            this.showStatus('success', `Extracted ${usernames.length} usernames (${uniqueNewUsers.length} new)`);
-            textInput.value = ''; // Clear the input
-            
-        } catch (error) {
-            console.error('Username extraction error:', error);
-            this.showStatus('error', 'Failed to extract usernames from text');
-        }
-    }
+    // Single unfollow removed - focusing on batch operations only
     
-    extractUsernamesFromText(text) {
-        const usernames = [];
-        
-        console.log('Input text:', text); // Debug logging
-        
-        // Simple parsing - treat each line as a potential username
-        const lines = text.split(/[\n\r]+/);
-        console.log('Split into lines:', lines); // Debug logging
-        
-        lines.forEach((line, index) => {
-            line = line.trim();
-            if (!line) return;
-            
-            // Remove @ symbol if present and clean the username
-            const username = line.replace(/^@/, '').trim();
-            console.log(`Line ${index}: "${line}" -> username: "${username}"`); // Debug logging
-            
-            // Validate and add username
-            if (username && this.isValidUsername(username)) {
-                usernames.push(username);
-                console.log(`Added valid username: ${username}`); // Debug logging
-            } else {
-                console.log(`Invalid username rejected: "${username}"`); // Debug logging
-            }
-        });
-        
-        // Remove duplicates
-        const uniqueUsernames = [...new Set(usernames)];
-        console.log('Unique usernames:', uniqueUsernames); // Debug logging
-        
-        // Remove logged-in user from the list
-        const loggedInUsername = this.getLoggedInUsername();
-        if (loggedInUsername) {
-            const filtered = uniqueUsernames.filter(username => username.toLowerCase() !== loggedInUsername.toLowerCase());
-            console.log(`Filtered out logged-in user (${loggedInUsername}):`, filtered); // Debug logging
-            return filtered;
-        }
-        
-        return uniqueUsernames;
-    }
+    // Extract usernames functionality removed - use CSV import instead
     
     getLoggedInUsername() {
         const usernameDisplay = document.getElementById('username-display');
-        return usernameDisplay ? usernameDisplay.textContent.trim() : null;
+        const username = usernameDisplay ? usernameDisplay.textContent.trim() : null;
+        // If username is 'User' (placeholder), return null to skip filtering
+        return (username && username !== 'User') ? username : null;
     }
+    
+    // Complex timer functions removed - were causing excessive API calls
 
     async handleCSVUpload(event) {
         const file = event.target.files[0];
@@ -501,29 +439,28 @@ class XUnfollowApp {
         });
     }
     
-    async handleRealisticBatch(type) {
+    async handleBatchUnfollow() {
         if (this.isProcessing) return;
         
         const selectedUsernames = [...this.selectedUsers];
-        const maxUsers = type === 'test' ? 5 : 1000; // Test: 5 users, Regular: unlimited
-        const buttonId = type === 'test' ? 'test-batch-btn' : 'regular-batch-btn';
+        const buttonId = 'regular-batch-btn';
         
         if (selectedUsernames.length === 0) {
             this.showStatus('warning', 'Please select at least one account to unfollow');
             return;
         }
         
-        if (selectedUsernames.length > maxUsers) {
-            this.showStatus('warning', `Maximum ${maxUsers} accounts allowed for ${type} batch`);
+        if (selectedUsernames.length > 1000) {
+            this.showStatus('warning', 'Maximum 1000 accounts allowed per batch');
             return;
         }
         
-        // Calculate estimated duration (15 minutes per unfollow)
-        const estimatedHours = Math.round(selectedUsernames.length * 15 / 60 * 10) / 10;
-        const batchName = type === 'test' ? 'Test Batch' : 'Regular Batch';
+        // Calculate estimated duration (first unfollow instant, then 15 minutes each)
+        const estimatedHours = Math.round((selectedUsernames.length - 1) * 15 / 60 * 10) / 10;
         
-        const confirmMessage = `Start ${batchName} for ${selectedUsernames.length} accounts?\n\n` +
-                              `• 1 unfollow every 15 minutes\n` +
+        const confirmMessage = `Start batch unfollow for ${selectedUsernames.length} accounts?\n\n` +
+                              `• First unfollow: Instant\n` +
+                              `• Remaining: 1 every 15 minutes\n` +
                               `• Estimated duration: ${estimatedHours} hours\n` +
                               `• Respects free API tier limits\n` +
                               `• You can monitor progress and cancel if needed\n\n` +
@@ -543,28 +480,30 @@ class XUnfollowApp {
                 body: JSON.stringify({ 
                     usernames: selectedUsernames, 
                     interval_minutes: 15,
-                    batch_type: type
+                    batch_type: 'regular'
                 })
             });
             
             const data = await response.json();
             
             if (response.ok && data.success) {
-                this.showStatus('success', `Started ${batchName} for ${selectedUsernames.length} users (${data.estimated_duration_hours} hours)`);
+                this.showStatus('success', `Started batch unfollow for ${selectedUsernames.length} users (${data.estimated_duration_hours} hours)`);
                 this.selectNone(); // Clear selections
                 this.loadSlowBatchOperations(); // Refresh operations list
+                // Reset completion tracking for new operation
+                this.lastCompletionCounts = {};
+                // Check for initial unfollow after batch starts
+                this.checkInitialUnfollow();
             } else {
-                this.showStatus('error', data.error || `Failed to start ${batchName}`);
+                this.showStatus('error', data.error || `Failed to start batch unfollow`);
             }
             
         } catch (error) {
-            console.error('Realistic batch error:', error);
+            console.error('Batch unfollow error:', error);
             this.showStatus('error', 'Network error occurred');
         } finally {
             this.isProcessing = false;
-            const originalText = type === 'test' ? 
-                '<i class="fas fa-flask me-2"></i>Test Batch<br><small class="d-block">1-5 users • 15 min intervals</small>' :
-                '<i class="fas fa-users-slash me-2"></i>Regular Batch<br><small class="d-block">Unlimited users • 15 min intervals</small>';
+            const originalText = '<i class="fas fa-users-slash me-2"></i>Start Batch Unfollow<br><small class="d-block">15 minute intervals • Free API tier optimized</small>';
             this.setButtonState(buttonId, false, originalText);
         }
     }
@@ -576,7 +515,7 @@ class XUnfollowApp {
             
             if (response.ok && data.success) {
                 this.showStatus('success', 'Authentication token refreshed successfully');
-                this.loadRateLimits();
+                this.checkAuthStatus(); // Check auth status after token refresh
             } else {
                 this.showStatus('error', data.message || 'Token refresh failed');
             }
@@ -724,8 +663,8 @@ class XUnfollowApp {
             return;
         }
         
-        // Calculate estimated duration
-        const estimatedHours = Math.round(selectedUsernames.length * intervalMinutes / 60 * 10) / 10;
+        // Calculate estimated duration (first unfollow instant, then intervals)
+        const estimatedHours = Math.round((selectedUsernames.length - 1) * intervalMinutes / 60 * 10) / 10;
         
         const confirmMessage = `Start slow batch unfollow for ${selectedUsernames.length} accounts?\n\n` +
                               `• 1 unfollow every ${intervalMinutes} minutes\n` +
@@ -786,11 +725,17 @@ class XUnfollowApp {
                 });
             }
             
-            // Smart refresh timing based on operation progress
-            if (data.active_count > 0) {
-                let refreshInterval = this.calculateRefreshInterval(data.operations);
-                setTimeout(() => this.loadSlowBatchOperations(), refreshInterval);
+            // Check for completion notifications and trigger refresh
+            if (data.completion_notifications && data.completion_notifications.length > 0) {
+                for (const notification of data.completion_notifications) {
+                    console.log(`Unfollow completion: ${notification.completed_count}/${notification.total_count} for ${notification.operation_id}`);
+                }
+                // Trigger refresh for rate limit updates
+                setTimeout(() => this.refreshRateLimitsAndStatus(), 1000);
             }
+            
+            // Schedule smart checking for active operations only
+            this.scheduleSmartCheck(data.operations);
             
             // Update rate limits if we got new data
             this.updateRateLimitsFromOperations(data.operations);
@@ -812,21 +757,143 @@ class XUnfollowApp {
         }
     }
     
-    calculateRefreshInterval(operations) {
-        // Smart refresh timing: frequent after first unfollow, then match unfollow intervals
-        for (const operation of operations) {
-            if (operation.status === 'running') {
-                // If this is a new operation (completed_count 0 or 1), refresh more frequently
-                if (operation.completed_count <= 1) {
-                    return 60000; // 1 minute for new operations
+    // Removed complex completion detection - using backend recent_completion flag instead
+
+    async manualRefresh() {
+        // Manual refresh with visual feedback
+        const refreshBtn = document.getElementById('refresh-operations-btn');
+        const originalText = refreshBtn.innerHTML;
+        
+        try {
+            // Show loading state
+            refreshBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Refreshing...';
+            refreshBtn.disabled = true;
+            
+            // Refresh both rate limits and operations
+            await this.refreshRateLimitsAndStatus();
+            
+            // Brief success feedback
+            refreshBtn.innerHTML = '<i class="fas fa-check me-1"></i>Updated';
+            setTimeout(() => {
+                refreshBtn.innerHTML = originalText;
+                refreshBtn.disabled = false;
+            }, 1000);
+            
+        } catch (error) {
+            console.error('Manual refresh error:', error);
+            refreshBtn.innerHTML = '<i class="fas fa-exclamation-triangle me-1"></i>Error';
+            setTimeout(() => {
+                refreshBtn.innerHTML = originalText;
+                refreshBtn.disabled = false;
+            }, 2000);
+        }
+    }
+
+    async refreshRateLimitsAndStatus() {
+        // Refresh rate limits and status without excessive UI updates
+        try {
+            const response = await fetch('/status');
+            const data = await response.json();
+            
+            if (data.rate_limits) {
+                this.updateRateLimitDisplay(data.rate_limits);
+            }
+            
+            // Also refresh operations list for latest data
+            this.loadSlowBatchOperations();
+            
+        } catch (error) {
+            console.error('Error refreshing rate limits:', error);
+        }
+    }
+
+    checkInitialUnfollow() {
+        // Check for the first unfollow completion after starting a batch
+        // Wait a few seconds for the initial unfollow to process, then check once
+        setTimeout(async () => {
+            try {
+                const response = await fetch('/unfollow/slow-batch/list');
+                const data = await response.json();
+                
+                // Check if any operation shows a completion
+                for (const operation of data.operations || []) {
+                    if (operation.completed_count > 0) {
+                        console.log(`Initial unfollow detected for ${operation.id}: ${operation.completed_count} completed`);
+                        // Refresh to show updated rate limits
+                        this.refreshRateLimitsAndStatus();
+                        break;
+                    }
                 }
-                // For ongoing operations, refresh every 15 minutes (match unfollow intervals)
-                return 900000; // 15 minutes
+                
+            } catch (error) {
+                console.error('Error checking initial unfollow:', error);
+            }
+        }, 1000); // Wait 1 second for first unfollow to process
+    }
+
+    scheduleSmartCheck(operations) {
+        // Clear any existing smart check timer
+        if (this.smartCheckTimer) {
+            clearTimeout(this.smartCheckTimer);
+            this.smartCheckTimer = null;
+        }
+        
+        // Only schedule if there are active operations
+        const activeOperations = operations && operations.filter(op => op.status === 'running');
+        if (!activeOperations || activeOperations.length === 0) {
+            console.log('No active operations - smart checking disabled');
+            return;
+        }
+        
+        // Calculate when the NEXT unfollow should happen
+        let nextCheckTime = this.calculateNextUnfollowTime(activeOperations);
+        
+        if (nextCheckTime) {
+            this.smartCheckTimer = setTimeout(() => {
+                console.log('Smart check: Looking for unfollow completions...');
+                this.loadSlowBatchOperations(); // This will check for completion notifications
+            }, nextCheckTime);
+            
+            console.log(`Smart check scheduled for ${(nextCheckTime/60000).toFixed(1)} minutes (next expected unfollow + 1min buffer)`);
+        }
+    }
+
+    calculateNextUnfollowTime(activeOperations) {
+        // Calculate when the next unfollow should happen based on batch progress
+        for (const operation of activeOperations) {
+            if (operation.start_time && operation.completed_count !== undefined) {
+                // Parse start time (format: "2025-06-13 15:29:16")
+                const startTime = new Date(operation.start_time).getTime();
+                const completedCount = operation.completed_count;
+                const totalCount = operation.total_count;
+                
+                // If all unfollows are done, no need to check
+                if (completedCount >= totalCount) {
+                    continue;
+                }
+                
+                // Calculate when the NEXT unfollow should happen
+                // First unfollow is immediate, then 15-min intervals: T+0, T+15, T+30, T+45...
+                const expectedUnfollowTime = startTime + (completedCount * 15 * 60 * 1000);
+                const checkTime = expectedUnfollowTime + (60 * 1000); // +1 minute buffer
+                
+                // Calculate milliseconds from now
+                const now = Date.now();
+                const timeUntilCheck = checkTime - now;
+                
+                // Don't schedule if time has already passed or is too soon
+                if (timeUntilCheck > 30000) { // At least 30 seconds in the future
+                    return timeUntilCheck;
+                }
             }
         }
-        // Default for non-running operations
-        return 60000; // 1 minute
+        
+        return null; // No valid check time found
     }
+
+    // Removed SSE event stream - using direct completion notifications instead
+
+    // Removed automatic timer refresh - now only refreshes on actual unfollow completions
     
     renderSlowBatchOperations() {
         const container = document.getElementById('slow-batch-operations-container');
@@ -868,11 +935,8 @@ class XUnfollowApp {
                             Progress: ${operation.completed_count}/${operation.total_count} 
                             (${operation.success_count} successful)
                         </div>
-                        <div class="small text-muted">
+                        <div class="small text-muted" id="timer-${operation.operation_id}">
                             Started: ${operation.start_time || 'Not started'}
-                        </div>
-                        <div class="small text-muted">
-                            Last activity: ${operation.last_activity || 'Unknown'}
                         </div>
                         ${operation.estimated_completion ? `<div class="small text-muted">Est. completion: ${operation.estimated_completion}</div>` : ''}
                     </div>
@@ -895,6 +959,11 @@ class XUnfollowApp {
             `;
             
             list.appendChild(operationEl);
+            
+            // Add timer functionality for active operations
+            if (operation.status === 'running') {
+                this.updateOperationTimer(operation.operation_id, operation.start_time);
+            }
         });
     }
     
@@ -990,6 +1059,8 @@ function formatTime(seconds) {
         return `${secs}s`;
     }
 }
+
+// Complex rate limit message and timer functions removed - were causing API waste and UI complexity
 
 function debounce(func, wait) {
     let timeout;
