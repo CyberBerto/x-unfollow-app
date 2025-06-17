@@ -30,33 +30,21 @@ RATE_LIMITS = {
     'user_lookup': 300         # GET /users/by/username/:username
 }
 
-# Batch Processing Settings
-SMALL_BATCH_MAX = 10          # Maximum users for small batch unfollow
-FULL_BATCH_MAX = 50           # Maximum users for full batch unfollow
-SMALL_BATCH_DELAY = 1         # Seconds between small batch requests
-FULL_BATCH_DELAY = 18         # Seconds between full batch requests (15min/50 = 18s)
+# Layer 2 Error Classification Constants
+ERROR_CLASSIFICATION = {
+    'free_errors': ['User not found', 'User has been suspended', 'User blocked you'],
+    'expensive_errors': ['Rate limit exceeded', 'Service temporarily overloaded'],
+    'wait_times': {
+        'free_error': 5,      # 5 second wait for free errors
+        'expensive_error': 900  # 15 minute wait for expensive errors
+    }
+}
 
 # Application Settings
 SECRET_KEY_LENGTH = 32        # Length for Flask secret key generation
 SESSION_TIMEOUT = 7200        # Session timeout in seconds (2 hours - matches X token expiry)
 DEVELOPMENT_MODE = True       # Enable extended session for testing
 
-# Database Configuration (for multi-user support)
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///users.db")
-
-# User Management Settings
-MAX_USERS_PER_DAY = 100       # Daily user registration limit
-USER_RATE_LIMIT = {
-    'unfollows_per_hour': 50,     # Per user unfollow limit
-    'requests_per_minute': 10     # General API request limit per user
-}
-
-# Ad Configuration (for future implementation)
-AD_CONFIG = {
-    'enabled': os.getenv("ADS_ENABLED", "false").lower() == "true",
-    'ad_frequency': 5,            # Show ad every N operations
-    'ad_provider': 'google'       # google, custom, etc.
-}
 
 # Logging Configuration
 LOG_FILE = "app.log"
@@ -108,13 +96,13 @@ UI_CONFIG = {
 # Development Settings
 DEBUG_MODE = True
 DEV_SERVER_HOST = '0.0.0.0'
-DEV_SERVER_PORT = 5000
+DEV_SERVER_PORT = 5001
 
 # Production Settings (for deployment)
 PROD_SETTINGS = {
     'debug': False,
     'host': '0.0.0.0',
-    'port': 5000,
+    'port': 5001,
     'ssl_context': None,  # Set to SSL context for HTTPS
     'threaded': True
 }

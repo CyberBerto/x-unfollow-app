@@ -9,6 +9,7 @@ class XUnfollowApp {
         this.selectedUsers = new Set();
         this.isProcessing = false;
         this.activeSlowBatchOperations = [];
+        this.alertLog = [];
         this.rateLimits = {
             unfollow: { remaining: 'unknown', reset: 0, limit: 'unknown' },
             unfollow_hourly: { remaining: 'unknown', reset: 0, limit: 'unknown' },
@@ -86,28 +87,24 @@ class XUnfollowApp {
             this.renderCSVList();
             this.saveCSVListToStorage();
             console.log(`Removed ${username} from unfollow list`);
+            return true; // Successfully removed
         }
+        return false; // Username not found in list
     }
     
     init() {
+        // UX Layer 1: Simple initialization flow
         this.bindEvents();
-        this.loadRateLimits();
         this.checkAuthStatus();
-        this.loadSlowBatchOperations();
         this.loadCSVListFromStorage();
-        // No event stream needed - using completion notifications instead
+        this.loadSlowBatchOperations();
         
-        // Login status checking removed - was causing API rate limit waste
-        
-        // Check for URL parameters (error messages from OAuth)
+        // UX Layer 1: Simple error handling for OAuth
         const urlParams = new URLSearchParams(window.location.search);
         const error = urlParams.get('error');
-        const errorDescription = urlParams.get('error_description');
         if (error) {
-            this.showLoginError(error, errorDescription);
-            // Clean URL after showing error
-            const cleanUrl = window.location.pathname;
-            window.history.replaceState({}, document.title, cleanUrl);
+            this.showLoginError(error, urlParams.get('error_description'));
+            window.history.replaceState({}, document.title, window.location.pathname);
         }
     }
     
@@ -118,6 +115,12 @@ class XUnfollowApp {
         const csvInput = document.getElementById('csv-file-input');
         if (csvInput) {
             csvInput.addEventListener('change', (e) => this.handleCSVUpload(e));
+        }
+        
+        // Alert log toggle button
+        const toggleAlertLogBtn = document.getElementById('toggle-alert-log');
+        if (toggleAlertLogBtn) {
+            toggleAlertLogBtn.addEventListener('click', () => this.toggleAlertLog());
         }
         
         // Select all/none buttons
@@ -141,6 +144,10 @@ class XUnfollowApp {
         // Refresh operations button
         const refreshOpsBtn = document.getElementById('refresh-operations-btn');
         if (refreshOpsBtn) refreshOpsBtn.addEventListener('click', () => this.manualRefresh());
+        
+        // Clear batches button
+        const clearBatchesBtn = document.getElementById('clear-batches-btn');
+        if (clearBatchesBtn) clearBatchesBtn.addEventListener('click', () => this.clearAllBatches());
     }
     
     // Login status checking removed - was causing unnecessary API calls
@@ -159,7 +166,7 @@ class XUnfollowApp {
                 const userDisplayName = data.display_name || displayName;
                 
                 // Check if we have real user data or just placeholders
-                const hasRealData = displayName !== 'User' && displayId !== 'authenticated';
+                const hasRealData = displayName !== 'User' && displayName !== 'Loading...' && displayName !== 'Rate Limited' && displayId !== 'authenticated';
                 
                 if (hasRealData) {
                     // Show display name only
@@ -171,11 +178,19 @@ class XUnfollowApp {
                     if (userInfoSection) userInfoSection.classList.remove('d-none');
                     if (userInfoLoading) userInfoLoading.classList.add('d-none');
                 } else {
-                    // Hide user info and show loading message
-                    if (userInfoSection) userInfoSection.classList.add('d-none');
-                    if (userInfoLoading) userInfoLoading.classList.remove('d-none');
+                    // Show loading state with actual info if available
+                    const displayNameEl = document.getElementById('display-name');
+                    if (displayNameEl) {
+                        displayNameEl.textContent = data.display_name || displayName;
+                    }
                     
-                    // Timer functionality removed to prevent API waste"
+                    if (userInfoSection) userInfoSection.classList.remove('d-none');
+                    if (userInfoLoading) userInfoLoading.classList.add('d-none');
+                    
+                    // Retry getting user info after a delay if it's still loading
+                    if (displayName === 'Loading...' || displayName === 'Rate Limited') {
+                        setTimeout(() => this.retryUserInfo(), 10000); // Retry after 10 seconds
+                    }
                 }
                 
                 if (data.rate_limits) {
@@ -250,7 +265,11 @@ class XUnfollowApp {
         const now = Math.floor(Date.now() / 1000);
         const timeDiff = resetTimestamp - now;
         
-        if (timeDiff <= 0) return 'now';
+        if (timeDiff <= 0) {
+            // Reset time has passed - trigger rate limit refresh
+            this.checkAndResetExpiredRateLimits();
+            return 'now';
+        }
         
         const hours = Math.floor(timeDiff / 3600);
         const minutes = Math.floor((timeDiff % 3600) / 60);
@@ -260,6 +279,59 @@ class XUnfollowApp {
         } else {
             return `in ${minutes}m`;
         }
+    }
+    
+    checkAndResetExpiredRateLimits() {
+        const now = Math.floor(Date.now() / 1000);
+        let needsUpdate = false;
+        
+        // Check if hourly reset time has passed
+        if (this.rateLimits.unfollow_hourly.reset && 
+            this.rateLimits.unfollow_hourly.reset <= now) {
+            // Refresh rate limits from server
+            this.fetchUpdatedRateLimits();
+            needsUpdate = true;
+        }
+        
+        // Check if daily reset time has passed  
+        if (this.rateLimits.unfollow_daily.reset &&
+            this.rateLimits.unfollow_daily.reset <= now) {
+            // Refresh rate limits from server
+            this.fetchUpdatedRateLimits();
+            needsUpdate = true;
+        }
+        
+        return needsUpdate;
+    }
+    
+    fetchUpdatedRateLimits() {
+        // Fetch fresh rate limit data from server
+        fetch('/api/rate-limits')
+            .then(response => response.json())
+            .then(data => {
+                if (data.rate_limits) {
+                    this.rateLimits = { ...this.rateLimits, ...data.rate_limits };
+                    this.updateRateLimitDisplay(this.rateLimits);
+                }
+            })
+            .catch(error => {
+                console.error('Error fetching updated rate limits:', error);
+            });
+    }
+    
+    retryUserInfo() {
+        // Retry getting user info when it's in loading state
+        fetch('/api/retry-user-info', { method: 'POST' })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Refresh the page or update the display
+                    this.checkAuthStatus();
+                }
+            })
+            .catch(error => {
+                console.error('Error retrying user info:', error);
+            });
     }
     
     // Single unfollow removed - focusing on batch operations only
@@ -440,11 +512,12 @@ class XUnfollowApp {
     }
     
     async handleBatchUnfollow() {
+        // UX Layer 1: Simple batch start flow
         if (this.isProcessing) return;
         
         const selectedUsernames = [...this.selectedUsers];
-        const buttonId = 'regular-batch-btn';
         
+        // UX Layer 1: Basic validation
         if (selectedUsernames.length === 0) {
             this.showStatus('warning', 'Please select at least one account to unfollow');
             return;
@@ -455,28 +528,24 @@ class XUnfollowApp {
             return;
         }
         
-        // Calculate estimated duration (first unfollow instant, then 15 minutes each)
+        // UX Layer 1: Simple confirmation
         const estimatedHours = Math.round((selectedUsernames.length - 1) * 15 / 60 * 10) / 10;
-        
         const confirmMessage = `Start batch unfollow for ${selectedUsernames.length} accounts?\n\n` +
-                              `• First unfollow: Instant\n` +
-                              `• Remaining: 1 every 15 minutes\n` +
-                              `• Estimated duration: ${estimatedHours} hours\n` +
-                              `• Respects free API tier limits\n` +
-                              `• You can monitor progress and cancel if needed\n\n` +
-                              `This will run in the background. Continue?`;
+                              `Estimated duration: ${estimatedHours} hours\n` +
+                              `15-minute intervals between unfollows\n\n` +
+                              `Continue?`;
         
         if (!confirm(confirmMessage)) return;
         
+        // UX Layer 1: Simple processing state
         this.isProcessing = true;
-        this.setButtonState(buttonId, true, 'Starting...');
+        this.setButtonState('regular-batch-btn', true, 'Starting batch...');
         
         try {
+            // UX Layer 1: Simple API call
             const response = await fetch('/unfollow/slow-batch', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ 
                     usernames: selectedUsernames, 
                     interval_minutes: 15,
@@ -486,25 +555,27 @@ class XUnfollowApp {
             
             const data = await response.json();
             
+            // UX Layer 1: Simple response handling
             if (response.ok && data.success) {
-                this.showStatus('success', `Started batch unfollow for ${selectedUsernames.length} users (${data.estimated_duration_hours} hours)`);
-                this.selectNone(); // Clear selections
-                this.loadSlowBatchOperations(); // Refresh operations list
-                // Reset completion tracking for new operation
-                this.lastCompletionCounts = {};
-                // Check for initial unfollow after batch starts
-                this.checkInitialUnfollow();
+                if (data.queued) {
+                    this.showStatus('info', `Batch queued at position ${data.queue_position}`);
+                } else {
+                    this.showStatus('success', `Batch started for ${selectedUsernames.length} users`);
+                }
+                this.selectNone();
+                this.loadSlowBatchOperations();
             } else {
-                this.showStatus('error', data.error || `Failed to start batch unfollow`);
+                this.showStatus('error', data.error || 'Failed to start batch');
             }
             
         } catch (error) {
-            console.error('Batch unfollow error:', error);
+            console.error('Batch error:', error);
             this.showStatus('error', 'Network error occurred');
         } finally {
+            // UX Layer 1: Reset button state
             this.isProcessing = false;
-            const originalText = '<i class="fas fa-users-slash me-2"></i>Start Batch Unfollow<br><small class="d-block">15 minute intervals • Free API tier optimized</small>';
-            this.setButtonState(buttonId, false, originalText);
+            this.setButtonState('regular-batch-btn', false, 
+                '<i class="fas fa-users-slash me-2"></i>Start Batch Unfollow<br><small class="d-block">15 minute intervals</small>');
         }
     }
     
@@ -548,37 +619,107 @@ class XUnfollowApp {
         container.classList.remove('d-none');
     }
     
-    showStatus(type, message, duration = 5000) {
-        const container = document.getElementById('status-container');
-        const alert = document.getElementById('status-alert');
-        const icon = document.getElementById('status-icon');
-        const messageEl = document.getElementById('status-message');
+    showStatus(type, message, duration = 10000) {
+        // Update compact status in header
+        const icon = document.getElementById('status-icon-compact');
+        const messageEl = document.getElementById('status-message-compact');
         
-        if (!container || !alert || !icon || !messageEl) return;
+        if (!icon || !messageEl) return;
         
-        // Set alert type
-        alert.className = `alert alert-${type === 'error' ? 'danger' : type}`;
+        // Set icon and color
+        const iconConfig = {
+            success: { class: 'fas fa-check-circle text-success', color: 'text-success' },
+            error: { class: 'fas fa-exclamation-circle text-danger', color: 'text-danger' },
+            warning: { class: 'fas fa-exclamation-triangle text-warning', color: 'text-warning' },
+            info: { class: 'fas fa-info-circle text-info', color: 'text-info' }
+        }[type] || { class: 'fas fa-info-circle text-info', color: 'text-info' };
         
-        // Set icon
-        const iconClass = {
-            success: 'fas fa-check-circle status-success',
-            error: 'fas fa-exclamation-circle status-error',
-            warning: 'fas fa-exclamation-triangle status-warning',
-            info: 'fas fa-info-circle status-info'
-        }[type] || 'fas fa-info-circle status-info';
-        
-        icon.innerHTML = `<i class="${iconClass}"></i>`;
+        icon.innerHTML = `<i class="${iconConfig.class}"></i>`;
         messageEl.textContent = message;
+        messageEl.className = `small ${iconConfig.color}`;
         
-        // Show container
-        container.classList.remove('d-none');
-        container.classList.add('fade-in');
+        // Add to alert log
+        this.addToAlertLog(type, message);
         
-        // Auto-hide after duration
+        // Auto-reset to "Ready" after duration
         if (duration > 0) {
             setTimeout(() => {
-                container.classList.add('d-none');
+                icon.innerHTML = '<i class="fas fa-info-circle text-info"></i>';
+                messageEl.textContent = 'Ready';
+                messageEl.className = 'small';
             }, duration);
+        }
+    }
+    
+    addToAlertLog(type, message) {
+        const timestamp = new Date();
+        this.alertLog.unshift({
+            type: type,
+            message: message,
+            timestamp: timestamp.toLocaleTimeString()
+        });
+        
+        // Keep only last 50 alerts
+        if (this.alertLog.length > 50) {
+            this.alertLog = this.alertLog.slice(0, 50);
+        }
+        
+        // Update alert log display if panel is visible
+        const panel = document.getElementById('alert-log-panel');
+        if (panel && !panel.classList.contains('d-none')) {
+            this.updateAlertLogDisplay();
+        }
+    }
+    
+    updateAlertLogDisplay() {
+        const logContent = document.getElementById('alert-log-content');
+        if (!logContent) return;
+        
+        if (this.alertLog.length === 0) {
+            logContent.innerHTML = '<div class="text-muted text-center">No alerts yet...</div>';
+            return;
+        }
+        
+        const logHtml = this.alertLog.map(alert => {
+            const iconConfig = {
+                success: 'fas fa-check-circle text-success',
+                error: 'fas fa-exclamation-circle text-danger',
+                warning: 'fas fa-exclamation-triangle text-warning',
+                info: 'fas fa-info-circle text-info'
+            }[alert.type] || 'fas fa-info-circle text-info';
+            
+            return `
+                <div class="d-flex align-items-start mb-1">
+                    <i class="${iconConfig} me-2 mt-1" style="font-size: 12px;"></i>
+                    <div class="flex-grow-1">
+                        <div class="text-truncate">${alert.message}</div>
+                        <div class="text-muted" style="font-size: 10px;">${alert.timestamp}</div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+        
+        logContent.innerHTML = logHtml;
+        
+        // Auto-scroll to top (newest)
+        logContent.scrollTop = 0;
+    }
+    
+    toggleAlertLog() {
+        const panel = document.getElementById('alert-log-panel');
+        const button = document.getElementById('toggle-alert-log');
+        
+        if (!panel || !button) return;
+        
+        if (panel.classList.contains('d-none')) {
+            panel.classList.remove('d-none');
+            this.updateAlertLogDisplay();
+            button.innerHTML = '<i class="fas fa-times"></i>';
+            button.title = 'Hide Alert Log';
+        } else {
+            panel.classList.add('d-none');
+            button.innerHTML = '<i class="fas fa-history"></i>';
+            button.title = 'Toggle Alert Log';
         }
     }
     
@@ -663,7 +804,7 @@ class XUnfollowApp {
             return;
         }
         
-        // Calculate estimated duration (first unfollow instant, then intervals)
+        // Simple estimation: use the interval time as base
         const estimatedHours = Math.round((selectedUsernames.length - 1) * intervalMinutes / 60 * 10) / 10;
         
         const confirmMessage = `Start slow batch unfollow for ${selectedUsernames.length} accounts?\n\n` +
@@ -720,9 +861,15 @@ class XUnfollowApp {
             
             // Remove successful unfollows from the CSV list
             if (data.successful_unfollows && data.successful_unfollows.length > 0) {
+                let removedCount = 0;
                 data.successful_unfollows.forEach(username => {
-                    this.removeUsernameFromList(username);
+                    const wasRemoved = this.removeUsernameFromList(username);
+                    if (wasRemoved) removedCount++;
                 });
+                
+                if (removedCount > 0) {
+                    console.log(`Auto-removed ${removedCount} successfully unfollowed users from CSV list`);
+                }
             }
             
             // Check for completion notifications and trigger refresh
@@ -866,15 +1013,14 @@ class XUnfollowApp {
                 const startTime = new Date(operation.start_time).getTime();
                 const completedCount = operation.completed_count;
                 const totalCount = operation.total_count;
-                
                 // If all unfollows are done, no need to check
                 if (completedCount >= totalCount) {
                     continue;
                 }
                 
-                // Calculate when the NEXT unfollow should happen
-                // First unfollow is immediate, then 15-min intervals: T+0, T+15, T+30, T+45...
-                const expectedUnfollowTime = startTime + (completedCount * 15 * 60 * 1000);
+                // Simple timing calculation with small margin
+                // Use the actual interval with small buffer for API timing
+                const expectedUnfollowTime = startTime + (completedCount * operation.interval_minutes * 60 * 1000);
                 const checkTime = expectedUnfollowTime + (60 * 1000); // +1 minute buffer
                 
                 // Calculate milliseconds from now
@@ -916,6 +1062,8 @@ class XUnfollowApp {
             const statusColor = {
                 'running': 'text-success',
                 'starting': 'text-info',
+                'queued': 'text-primary',
+                'waiting_for_lookup_reset': 'text-warning',
                 'completed': 'text-secondary',
                 'cancelled': 'text-warning',
                 'error': 'text-danger'
@@ -936,7 +1084,9 @@ class XUnfollowApp {
                             (${operation.success_count} successful)
                         </div>
                         <div class="small text-muted" id="timer-${operation.operation_id}">
-                            Started: ${operation.start_time || 'Not started'}
+                            ${operation.status === 'queued' ? `Queue position: ${operation.queue_position || 'Unknown'}` : 
+                              operation.status === 'waiting_for_lookup_reset' ? `Waiting for rate limit reset: ${operation.lookup_wait_minutes ? Math.ceil(operation.lookup_wait_minutes) + 'm remaining' : 'Processing...'}` :
+                              `Started: ${operation.start_time || 'Not started'}`}
                         </div>
                         ${operation.estimated_completion ? `<div class="small text-muted">Est. completion: ${operation.estimated_completion}</div>` : ''}
                     </div>
@@ -945,7 +1095,7 @@ class XUnfollowApp {
                                 onclick="window.xUnfollowApp.showOperationDetails('${operation.operation_id}')">
                             <i class="fas fa-info-circle"></i> Details
                         </button>
-                        ${operation.status === 'running' || operation.status === 'starting' ? 
+                        ${operation.status === 'running' || operation.status === 'starting' || operation.status === 'queued' || operation.status === 'waiting_for_lookup_reset' ? 
                             `<button type="button" class="btn btn-outline-danger btn-sm" 
                                      onclick="window.xUnfollowApp.cancelOperation('${operation.operation_id}')">
                                 <i class="fas fa-stop"></i> Cancel
@@ -953,7 +1103,7 @@ class XUnfollowApp {
                     </div>
                 </div>
                 <div class="progress mt-2" style="height: 8px;">
-                    <div class="progress-bar ${operation.status === 'completed' ? 'bg-success' : operation.status === 'error' ? 'bg-danger' : 'bg-info'}" 
+                    <div class="progress-bar ${operation.status === 'completed' ? 'bg-success' : operation.status === 'error' ? 'bg-danger' : operation.status === 'queued' || operation.status === 'waiting_for_lookup_reset' ? 'bg-warning' : 'bg-info'}" 
                          style="width: ${(operation.completed_count / operation.total_count) * 100}%"></div>
                 </div>
             `;
@@ -1019,6 +1169,28 @@ Timing:
             }
         } catch (error) {
             console.error('Error cancelling operation:', error);
+            this.showStatus('error', 'Network error occurred');
+        }
+    }
+    
+    async clearAllBatches() {
+        if (!confirm('Are you sure you want to clear ALL batch operations? This will remove all active, queued, and completed batches.')) return;
+        
+        try {
+            const response = await fetch('/debug/clear-batches', {
+                method: 'POST'
+            });
+            
+            const data = await response.json();
+            
+            if (response.ok && data.success) {
+                this.showStatus('success', `Cleared ${data.cleared_operations} batch operations`);
+                this.loadSlowBatchOperations(); // Refresh list
+            } else {
+                this.showStatus('error', data.error || 'Failed to clear batches');
+            }
+        } catch (error) {
+            console.error('Error clearing batches:', error);
             this.showStatus('error', 'Network error occurred');
         }
     }

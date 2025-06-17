@@ -13,43 +13,76 @@
         {% if authenticated %}
         <!-- Header with Authentication & Rate Limits -->
         <div class="row mb-4 align-items-center">
-            <div class="col-md-6">
+            <div class="col-md-4">
                 <div>
-                    <h1 class="display-5 mb-2"><i class="fab fa-x-twitter me-3"></i>X Unfollow Tool</h1>
-                    <p class="lead text-muted mb-0">Safely unfollow X accounts with rate limit compliance</p>
+                    <h3 class="mb-1"><i class="fab fa-x-twitter me-2"></i>X Unfollow Tool</h3>
+                    <p class="text-muted mb-0 small">Safely unfollow X accounts with rate limit compliance</p>
                 </div>
             </div>
-            <div class="col-md-3">
-                <div class="card">
-                    <div class="card-body p-3">
-                        <h6 class="card-title text-success mb-2">
-                            <i class="fas fa-check-circle me-1"></i>Authenticated
-                        </h6>
-                        <div class="small" id="user-info-section">
-                            <strong id="display-name">{{ session.get('display_name', session.get('username', 'User')) }}</strong>
+            <div class="col-md-4">
+                <div class="row">
+                    <div class="col-6">
+                        <div class="card">
+                            <div class="card-body p-2">
+                                <h6 class="card-title text-success mb-1 text-center">
+                                    <i class="fas fa-check-circle me-1"></i>Auth
+                                </h6>
+                                <div class="small text-center">
+                                    <strong id="display-name">{{ session.get('display_name', session.get('username', 'User')) }}</strong>
+                                </div>
+                                <div class="mt-1 text-center">
+                                    <a href="/logout" class="btn btn-outline-secondary btn-sm">
+                                        <i class="fas fa-sign-out-alt me-1"></i>Logout
+                                    </a>
+                                </div>
+                            </div>
                         </div>
-                        <div class="mt-2">
-                            <a href="/logout" class="btn btn-outline-secondary btn-sm">
-                                <i class="fas fa-sign-out-alt me-1"></i>Logout
-                            </a>
+                    </div>
+                    <div class="col-6">
+                        <div class="card">
+                            <div class="card-body p-2">
+                                <h6 class="card-title mb-1 text-center">
+                                    <i class="fas fa-tachometer-alt me-1"></i>Limits
+                                </h6>
+                                <div class="row text-center">
+                                    <div class="col-6">
+                                        <span class="small text-muted">Hour</span><br>
+                                        <span id="unfollow-rate-limit-hour" class="badge bg-secondary">...</span>
+                                    </div>
+                                    <div class="col-6">
+                                        <span class="small text-muted">Day</span><br>
+                                        <span id="unfollow-rate-limit-day" class="badge bg-secondary">...</span>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
             </div>
-            <div class="col-md-3">
+            <div class="col-md-4">
                 <div class="card">
                     <div class="card-body p-3">
                         <h6 class="card-title mb-2 text-center">
-                            <i class="fas fa-tachometer-alt me-1"></i>Rate Limits
+                            <i class="fas fa-bell me-1"></i>Status
+                            <button class="btn btn-outline-secondary btn-sm ms-2" type="button" id="toggle-alert-log" title="Toggle Alert Log">
+                                <i class="fas fa-history"></i>
+                            </button>
                         </h6>
-                        <div class="row text-center">
-                            <div class="col-6">
-                                <span class="small text-muted">Hour</span><br>
-                                <span id="unfollow-rate-limit-hour" class="badge bg-secondary">Loading...</span>
+                        <div id="status-alert-compact" class="text-center">
+                            <div id="status-icon-compact" class="mb-1">
+                                <i class="fas fa-info-circle text-info"></i>
                             </div>
-                            <div class="col-6">
-                                <span class="small text-muted">Day</span><br>
-                                <span id="unfollow-rate-limit-day" class="badge bg-secondary">Loading...</span>
+                            <div id="status-message-compact" class="small">Ready</div>
+                            <div id="status-progress-compact" class="progress mt-2 d-none" style="height: 8px;">
+                                <div id="status-progress-bar-compact" class="progress-bar" role="progressbar" style="width: 0%"></div>
+                            </div>
+                        </div>
+                        <!-- Alert Log Panel (hidden by default) -->
+                        <div id="alert-log-panel" class="mt-3 d-none">
+                            <div class="border rounded p-2" style="max-height: 200px; overflow-y: auto; background-color: #f8f9fa;">
+                                <div id="alert-log-content" class="small">
+                                    <div class="text-muted text-center">No alerts yet...</div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -103,28 +136,6 @@
         {% endif %}
 
         {% if authenticated %}
-        <!-- Status Messages -->
-        <div class="row mb-4">
-            <div class="col-12">
-                <div id="status-container" class="d-none">
-                    <div id="status-alert" class="alert alert-info" role="alert">
-                        <div class="d-flex align-items-center">
-                            <div id="status-icon" class="me-3">
-                                <i class="fas fa-info-circle"></i>
-                            </div>
-                            <div class="flex-grow-1">
-                                <div id="status-message">Ready</div>
-                                <div id="status-progress" class="progress mt-2 d-none" style="height: 20px;">
-                                    <div id="status-progress-bar" class="progress-bar" role="progressbar" style="width: 0%">
-                                        <span id="status-progress-text">0%</span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
 
         <!-- Single unfollow and extract usernames removed - focusing on batch CSV operations only -->
 
@@ -134,9 +145,14 @@
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h6 class="mb-0"><i class="fas fa-clock me-2"></i>Active Slow Batch Operations</h6>
-                        <button type="button" class="btn btn-outline-secondary btn-sm" id="refresh-operations-btn">
-                            <i class="fas fa-refresh me-1"></i>Refresh
-                        </button>
+                        <div>
+                            <button type="button" class="btn btn-outline-danger btn-sm me-2" id="clear-batches-btn">
+                                <i class="fas fa-trash me-1"></i>Clear All
+                            </button>
+                            <button type="button" class="btn btn-outline-secondary btn-sm" id="refresh-operations-btn">
+                                <i class="fas fa-refresh me-1"></i>Refresh
+                            </button>
+                        </div>
                     </div>
                     <div class="card-body">
                         <div id="slow-batch-operations-list">
@@ -233,12 +249,12 @@
                                 </ul>
                             </div>
                             <div class="col-md-6">
-                                <h6><i class="fas fa-cogs me-2"></i>Batch Operations</h6>
+                                <h6><i class="fas fa-cogs me-2"></i>Batch Queue System</h6>
                                 <ul class="small">
-                                    <li><strong>Batch Unfollow:</strong> Max 1000 users per batch</li>
-                                    <li><strong>Large Lists:</strong> Run sequential batches (can't run simultaneously)</li>
-                                    <li>Designed for free API tier rate limits</li>
-                                    <li>Background processing with progress tracking</li>
+                                    <li><strong>Sequential Processing:</strong> One batch runs at a time</li>
+                                    <li><strong>Queue Limit:</strong> Maximum 3 batches total (running + queued)</li>
+                                    <li><strong>Auto-Start:</strong> Next batch starts when current completes</li>
+                                    <li><strong>Per Batch:</strong> Max 1000 users, 15-minute intervals</li>
                                 </ul>
                             </div>
                         </div>

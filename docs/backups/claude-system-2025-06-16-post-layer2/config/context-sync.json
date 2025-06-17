@@ -1,0 +1,67 @@
+{
+  "sync_configuration": {
+    "auto_sync": true,
+    "sync_triggers": [
+      "session_start",
+      "session_end", 
+      "layer_completion",
+      "significant_progress"
+    ],
+    "sync_frequency": "per_session"
+  },
+  "source_files": {
+    "documentation": {
+      "active_session": "docs/active/Next-Session-Immediate-Start.md",
+      "current_sprint": "docs/active/Quick-Session-End.md",
+      "layer_plan": "docs/planning/Development-Pivot-Plan.md",
+      "progress_latest": "docs/progress/session-logs/[latest]"
+    },
+    "technical": {
+      "functions_inventory": "docs/technical/Current-Functions-Inventory.md", 
+      "daily_logs": "docs/technical/daily-logs/[current-date]",
+      "architecture": "docs/technical/App-Architecture-Analysis.md"
+    },
+    "reference": {
+      "development_principles": "docs/reference/Development-Principles.md",
+      "project_spec": "docs/reference/Original-Project-Spec.md",
+      "workflow_standards": "docs/reference/Workflow-Standards.md"
+    }
+  },
+  "claude_context_files": {
+    "session_state": ".claude/context/current-session.json",
+    "layer_status": ".claude/context/layer-status.json", 
+    "quick_context": ".claude/context/quick-context.md"
+  },
+  "update_rules": {
+    "session_start": {
+      "update_current_session": true,
+      "load_latest_progress": true,
+      "verify_layer_status": true,
+      "refresh_priorities": true
+    },
+    "session_end": {
+      "update_layer_progress": true,
+      "archive_session_state": true,
+      "prepare_next_context": true,
+      "backup_current_state": true
+    },
+    "layer_completion": {
+      "update_layer_status": true,
+      "advance_current_layer": true,
+      "update_project_progress": true,
+      "prepare_next_layer": true
+    }
+  },
+  "backup_strategy": {
+    "backup_frequency": "per_session",
+    "retention_period": "30_days",
+    "backup_location": "docs/z-archive/claude-backups/",
+    "versioning": "timestamped"
+  },
+  "audit_trail": {
+    "track_all_changes": true,
+    "log_sync_operations": true,
+    "record_decision_points": true,
+    "maintain_change_history": true
+  }
+}

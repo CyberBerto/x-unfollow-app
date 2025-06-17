@@ -40,6 +40,60 @@ x_client = XAPIClient(CLIENT_ID, CLIENT_SECRET, CALLBACK_URL)
 # Global variable to track slow batch operations
 slow_batch_operations = {}
 
+# Global batch queue management
+batch_queue = []  # Queue of pending batch operations
+MAX_TOTAL_BATCHES = 3  # Maximum total batches (running + queued)
+
+def get_active_batch_count(user_id):
+    """Get count of active batches for a user (running + queued)."""
+    active_count = 0
+    
+    # Count running/starting operations
+    for operation in slow_batch_operations.values():
+        if (operation['user_id'] == user_id and 
+            operation['status'] in ['starting', 'running', 'waiting_for_rate_limit_reset']):
+            active_count += 1
+    
+    # Count queued operations for this user
+    for queued_op in batch_queue:
+        if queued_op['user_id'] == user_id:
+            active_count += 1
+    
+    return active_count
+
+def get_running_batch(user_id):
+    """Get the currently running batch for a user, if any."""
+    for operation in slow_batch_operations.values():
+        if (operation['user_id'] == user_id and 
+            operation['status'] in ['running', 'waiting_for_rate_limit_reset']):
+            return operation
+    return None
+
+def start_next_queued_batch():
+    """Start the next batch in queue if no batch is currently running."""
+    global batch_queue
+    
+    if not batch_queue:
+        return
+    
+    # Check if any batch is currently running (across all users)
+    for operation in slow_batch_operations.values():
+        if operation['status'] in ['running', 'waiting_for_rate_limit_reset']:
+            return  # A batch is already running, don't start another
+    
+    # Start the next queued batch
+    next_batch = batch_queue.pop(0)
+    logging.info(f"Starting queued batch {next_batch['operation_id']} for user {next_batch['user_id']}")
+    
+    # Start the batch thread
+    thread = threading.Thread(
+        target=slow_batch_worker,
+        args=(next_batch['operation_id'], next_batch['user_id'], 
+              next_batch['usernames'], next_batch['interval_minutes']),
+        daemon=True
+    )
+    thread.start()
+
 def cleanup_old_operations():
     """Clean up old completed/cancelled/error operations to prevent memory buildup."""
     try:
@@ -63,6 +117,9 @@ def cleanup_old_operations():
             
         if operations_to_remove:
             logging.info(f"Cleaned up {len(operations_to_remove)} old batch operations")
+            
+        # Try to start next queued batch after cleanup
+        start_next_queued_batch()
             
     except Exception as e:
         logging.error(f"Error during operation cleanup: {str(e)}")
@@ -88,6 +145,62 @@ def save_unfollow_log(log_data):
             json.dump(log_data, f, indent=2)
     except Exception as e:
         logging.error(f"Error saving unfollow log: {str(e)}")
+
+def classify_unfollow_error(error_message, success):
+    """
+    Layer 2: Classify unfollow errors for intelligent wait timing.
+    Enhanced to handle structured error information from X API client.
+    
+    Args:
+        error_message (str): Error message from unfollow attempt
+        success (bool): Whether unfollow was successful
+        
+    Returns:
+        tuple: (error_type, wait_seconds)
+    """
+    if success:
+        return "success", 15 * 60  # Normal 15-min wait
+    
+    # Check for enhanced error information from API client
+    if hasattr(x_client, 'last_api_error') and x_client.last_api_error:
+        error_info = x_client.last_api_error
+        error_type = error_info.get('type', 'unknown')
+        error_code = error_info.get('code', 0)
+        http_status = error_info.get('http_status', 0)
+        
+        # Rate limit errors - wait longer
+        if error_type == 'rate_limit' or http_status == 429:
+            return "rate_limit", 15 * 60  # 15-minute wait
+        
+        # Authentication errors - require re-login
+        if error_type == 'auth_error' or http_status == 401:
+            return "auth_error", 15 * 60  # 15-minute wait
+        
+        # Permission errors - permanent issue
+        if error_type == 'permission_error' or http_status == 403:
+            return "permission_error", 15 * 60  # 15-minute wait
+        
+        # Server errors - retry later
+        if error_type == 'server_error' or 500 <= http_status < 600:
+            return "server_error", 15 * 60  # 15-minute wait
+        
+        # X API specific error codes (from JSON in 200 response)
+        if error_type == 'api_error':
+            # User-specific errors that don't consume quota (fast retry)
+            USER_SPECIFIC_CODES = [17, 50, 63]  # User not found, suspended, doesn't exist
+            if error_code in USER_SPECIFIC_CODES:
+                return "user_specific", 5  # 5-second wait
+        
+        # Check error message for known patterns
+        if error_info.get('message'):
+            error_msg_lower = error_info['message'].lower()
+            if any(pattern in error_msg_lower for pattern in [
+                "not following", "user not found", "account suspended", "does not exist"
+            ]):
+                return "user_specific", 5  # 5-second wait
+    
+    # Default: Conservative wait for any unclassified errors
+    return "unknown", 15 * 60  # Conservative 15-minute wait
 
 def clean_old_entries(log_data):
     """Remove entries older than 24 hours."""
@@ -214,15 +327,15 @@ def callback():
             if "Rate limit exceeded" in str(user_info_error):
                 session.permanent = True
                 session['user_id'] = 'authenticated'
-                session['username'] = 'User'
-                session['display_name'] = 'User'
-                logging.info("Authentication successful, user info rate limited")
+                session['username'] = 'Rate Limited'
+                session['display_name'] = 'Rate Limited (will update shortly)'
+                logging.info("Authentication successful, user info rate limited - will retry later")
             else:
                 # For non-rate-limit errors, still allow login but log the issue
                 session.permanent = True
                 session['user_id'] = 'authenticated'
-                session['username'] = 'User'
-                session['display_name'] = 'User'
+                session['username'] = 'Loading...'
+                session['display_name'] = 'Loading user info...'
                 logging.warning(f"Authentication successful, but user info failed: {str(user_info_error)}")
         
         return redirect(url_for('index'))
@@ -272,6 +385,44 @@ def refresh_token():
 
 # Simplified to single batch processing approach (15-minute intervals only)
 
+@app.route('/debug/clear-batches', methods=['POST'])
+def clear_all_batches():
+    """Debug endpoint to clear all batch operations."""
+    if 'user_id' not in session:
+        return jsonify({'error': 'Not authenticated'}), 401
+    
+    try:
+        global slow_batch_operations, batch_queue
+        
+        # Count operations before clearing
+        total_operations = len(slow_batch_operations)
+        user_operations = len([op for op in slow_batch_operations.values() if op['user_id'] == session['user_id']])
+        
+        # Clear all operations for this user
+        operations_to_remove = []
+        for op_id, operation in slow_batch_operations.items():
+            if operation['user_id'] == session['user_id']:
+                operations_to_remove.append(op_id)
+        
+        for op_id in operations_to_remove:
+            del slow_batch_operations[op_id]
+        
+        # Clear queue entries for this user
+        batch_queue = [q for q in batch_queue if q['user_id'] != session['user_id']]
+        
+        logging.info(f"Debug: Cleared {len(operations_to_remove)} batch operations for user {session['user_id']}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Cleared {len(operations_to_remove)} batch operations',
+            'cleared_operations': len(operations_to_remove),
+            'remaining_total': len(slow_batch_operations)
+        })
+        
+    except Exception as e:
+        logging.error(f"Error clearing batches: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/status')
 def status():
     """Get current authentication and rate limit status (simplified)."""
@@ -296,15 +447,60 @@ def status():
         logging.error(f"Status check error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/rate-limits', methods=['GET'])
+def get_rate_limits():
+    """Get current rate limit status for UI updates."""
+    try:
+        if 'user_id' not in session:
+            return jsonify({'error': 'Authentication required'}), 401
+            
+        # Get cached rate limits without making API calls
+        rate_limits = x_client.get_rate_limit_status(refresh_from_api=False)
+        
+        return jsonify({
+            'rate_limits': rate_limits,
+            'timestamp': int(time.time())
+        })
+        
+    except Exception as e:
+        logging.error(f"Rate limits check error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/retry-user-info', methods=['POST'])
+def retry_user_info():
+    """Retry getting user info when it failed during login."""
+    try:
+        if 'user_id' not in session:
+            return jsonify({'error': 'Authentication required'}), 401
+            
+        # Only retry if we're in a placeholder state
+        current_username = session.get('username', '')
+        if current_username not in ['User', 'Loading...', 'Rate Limited']:
+            return jsonify({'success': True, 'message': 'User info already available'})
+            
+        # Try to get user info again
+        user_info = x_client.get_user_info()
+        if user_info:
+            session['username'] = user_info.get('username', 'Unknown')
+            session['display_name'] = user_info.get('name', session['username'])
+            logging.info(f"User info retry successful: @{session['username']}")
+            return jsonify({'success': True, 'message': 'User info updated'})
+        else:
+            return jsonify({'success': False, 'message': 'User info still unavailable'})
+            
+    except Exception as e:
+        logging.error(f"User info retry error: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 # Debug API endpoint removed - not needed for production batch processing
 
 # Core batch processing functions below - all debug/single features removed
 
 def slow_batch_worker(operation_id, user_id, usernames, interval_minutes=15):
-    """Background worker for slow batch unfollowing (configurable interval)."""
+    """Layer 1: Clean basic batch worker - simple, predictable processing."""
     operation = None
     try:
-        # Initialize operation with error recovery
+        # Verify operation exists
         if operation_id not in slow_batch_operations:
             logging.error(f"Operation {operation_id} not found in batch operations")
             return
@@ -312,337 +508,114 @@ def slow_batch_worker(operation_id, user_id, usernames, interval_minutes=15):
         operation = slow_batch_operations[operation_id]
         operation['status'] = 'running'
         operation['start_time'] = time.time()
-        operation['error_count'] = 0
-        operation['consecutive_errors'] = 0
-        operation['last_error'] = None
         
-        # No pre-check - we'll handle rate limits on first actual unfollow attempt
+        logging.info(f"Starting batch {operation_id} for {len(usernames)} users")
         
+        # Layer 1: Simple sequential processing
         for i, username in enumerate(usernames):
+            # Check for cancellation
             if operation['status'] == 'cancelled':
                 break
                 
+            # Update current progress
             operation['current_username'] = username
             operation['current_index'] = i
+            operation['completed_count'] = i + 1
+            operation['last_update'] = time.time()
+            
+            # Layer 1: Basic unfollow attempt
+            success = False
+            error_msg = None
             
             try:
-                # Network connectivity check for critical errors
-                if operation['consecutive_errors'] >= 5:
-                    logging.warning(f"Batch {operation_id}: Too many consecutive errors, adding recovery delay")
-                    time.sleep(30)  # 30-second recovery delay
-                    operation['consecutive_errors'] = 0
-                    operation['notes'] = operation.get('notes', [])
-                    operation['notes'].append(f"Recovery delay applied after {operation['consecutive_errors']} consecutive errors")
+                # Resolve username to ID (if needed)
+                target_id = username if username.isdigit() else x_client.resolve_username_to_id(username)
                 
-                # Resolve username to ID with enhanced error handling
-                target_id = None
-                try:
-                    target_id = x_client.resolve_username_to_id(username) if not username.isdigit() else username
-                except Exception as resolve_error:
-                    resolve_error_msg = str(resolve_error)
-                    logging.error(f"Username resolution failed for {username}: {resolve_error_msg}")
-                    
-                    # Handle specific resolve errors
-                    if "Rate limit" in resolve_error_msg:
-                        operation['results'].append({'username': username, 'success': False, 'error': 'Rate limited during username resolution'})
-                    elif "Network" in resolve_error_msg or "Connection" in resolve_error_msg:
-                        operation['results'].append({'username': username, 'success': False, 'error': 'Network error during username resolution'})
-                        operation['consecutive_errors'] += 1
-                    else:
-                        operation['results'].append({'username': username, 'success': False, 'error': f'Username resolution error: {resolve_error_msg}'})
-                    
-                    operation['failed_count'] += 1
-                    operation['error_count'] += 1
-                    continue
-                
-                if not target_id:
-                    operation['results'].append({'username': username, 'success': False, 'error': 'User not found'})
-                    operation['failed_count'] += 1
-                    continue
-                
-                # Attempt unfollow with intelligent rate limit handling
-                success = False
-                retry_attempted = False
-                error_msg = None
-                
-                try:
+                if target_id:
+                    # Layer 2 Simplified: Direct unfollow with smart error classification
+                    # Note: Following pre-check removed due to X API permission requirements
+                    logging.info(f"🔄 Layer 2: Attempting unfollow for @{username}")
                     success = x_client.unfollow_user(user_id, target_id)
-                    operation['current_rate_limits'] = x_client.get_rate_limit_status()
                     
                     if success:
                         track_unfollow_attempt(True)
-                        logging.info(f"Unfollow successful for {username} ({i+1}/{len(usernames)})")
+                        logging.info(f"✅ Unfollowed @{username} ({i+1}/{len(usernames)})")
                     else:
                         track_unfollow_attempt(False)
-                        error_msg = "Unfollow returned False"
-                        
-                except Exception as e:
-                    error_msg = str(e)
-                    operation['error_count'] += 1
-                    operation['last_error'] = error_msg
-                    
-                    # Categorize error types for better handling
-                    if "Network" in error_msg or "Connection" in error_msg or "timeout" in error_msg.lower():
-                        operation['consecutive_errors'] += 1
-                        logging.error(f"Network error unfollowing {username}: {error_msg}")
-                    elif "unauthorized" in error_msg.lower() or "forbidden" in error_msg.lower():
-                        logging.error(f"Authorization error unfollowing {username}: {error_msg}")
-                        # Critical auth error - may need to abort batch
-                        if "token" in error_msg.lower():
-                            operation['notes'] = operation.get('notes', [])
-                            operation['notes'].append(f"Critical auth error detected: {error_msg}")
-                    else:
-                        logging.error(f"Unfollow attempt failed for {username}: {error_msg}")
-                    
-                    # Enhanced rate limit handling - retry for any user if rate limited
-                    if "Rate limit exceeded" in error_msg and not retry_attempted:
-                        operation_note = f"Rate limit hit on user {i+1}/{len(usernames)} ({username})"
-                        if i == 0:
-                            operation_note += " - First unfollow retry to ensure smooth batch"
-                        
-                        logging.info(f"Rate limit exceeded for {username}. Implementing smart retry...")
-                        operation['notes'] = operation.get('notes', [])
-                        operation['notes'].append(operation_note)
-                        operation['status'] = 'waiting_for_rate_limit_reset'
-                        operation['rate_limit_retry_count'] = operation.get('rate_limit_retry_count', 0) + 1
-                        
-                        # Get rate limit reset time with enhanced retry logic
-                        try:
-                            rate_status = x_client.get_rate_limit_status()
-                            reset_time = rate_status['unfollow']['reset_time']
-                            current_time = time.time()
-                            
-                            # Progressive wait buffer - longer buffer for multiple rate limit hits
-                            retry_count = operation.get('rate_limit_retry_count', 1)
-                            base_buffer = 10
-                            progressive_buffer = min(base_buffer * retry_count, 60)  # Max 60 second buffer
-                            wait_seconds = max(0, reset_time - current_time + progressive_buffer)
-                            
-                            # Adaptive wait time based on batch context
-                            if wait_seconds > 0:
-                                # For sustained 15-minute operations, be more conservative
-                                if len(usernames) > 50:  # Large batch
-                                    wait_seconds += 30  # Extra 30 seconds for large batches
-                                
-                                operation['rate_limit_wait_until'] = reset_time + progressive_buffer
-                                operation['adaptive_wait_seconds'] = wait_seconds
-                                logging.info(f"Suspending batch for {int(wait_seconds)} seconds (progressive buffer: {progressive_buffer}s)...")
-                                
-                                # Update operation status with wait time
-                                operation['waiting_for_reset'] = True
-                                operation['reset_wait_seconds'] = wait_seconds
-                                operation['current_username'] = f"{username} (waiting for rate limit reset)"
-                                
-                                # Enhanced wait with adaptive checking interval
-                                wait_start = time.time()
-                                check_interval = 5 if wait_seconds <= 300 else 10  # 10s intervals for long waits
-                                
-                                while time.time() - wait_start < wait_seconds:
-                                    if operation['status'] == 'cancelled':
-                                        break
-                                    
-                                    # Adaptive sleep interval based on remaining time
-                                    remaining_wait = wait_seconds - (time.time() - wait_start)
-                                    sleep_time = min(check_interval, max(1, remaining_wait))
-                                    time.sleep(sleep_time)
-                                    
-                                    operation['reset_wait_seconds'] = max(0, remaining_wait)
-                                    
-                                    # Log progress for long waits (every 60 seconds)
-                                    elapsed = time.time() - wait_start
-                                    if elapsed > 0 and int(elapsed) % 60 == 0 and remaining_wait > 60:
-                                        logging.info(f"Rate limit wait progress: {int(remaining_wait)}s remaining")
-                                
-                                if operation['status'] != 'cancelled':
-                                    operation['status'] = 'running'
-                                    operation['waiting_for_reset'] = False
-                                    retry_attempted = True
-                                    
-                                    # Retry with enhanced validation and fallback
-                                    logging.info(f"Rate limit reset. Retrying unfollow for {username} (attempt {retry_count})...")
-                                    
-                                    # Pre-retry validation
-                                    try:
-                                        # Quick rate limit check before retry
-                                        pre_retry_status = x_client.get_rate_limit_status()
-                                        if pre_retry_status['unfollow']['remaining'] == 0:
-                                            logging.warning(f"Rate limit still active after wait, extending wait time...")
-                                            time.sleep(60)  # Extra minute wait
-                                    except Exception as pre_check_error:
-                                        logging.warning(f"Pre-retry check failed: {str(pre_check_error)}")
-                                    
-                                    # Actual retry attempt
-                                    try:
-                                        success = x_client.unfollow_user(user_id, target_id)
-                                        operation['current_rate_limits'] = x_client.get_rate_limit_status()
-                                        if success:
-                                            track_unfollow_attempt(True)
-                                            error_msg = None  # Clear error since retry succeeded
-                                            operation['consecutive_errors'] = 0  # Reset consecutive errors
-                                            logging.info(f"Retry successful for {username} - batch will continue smoothly")
-                                            operation['notes'].append(f"Rate limit retry #{retry_count} successful for {username}")
-                                        else:
-                                            track_unfollow_attempt(False)
-                                            error_msg = "Retry unfollow returned False"
-                                            logging.warning(f"Retry returned False for {username} despite rate limit reset")
-                                    except Exception as retry_error:
-                                        error_msg = str(retry_error)
-                                        operation['error_count'] += 1
-                                        if "Network" in str(retry_error) or "Connection" in str(retry_error):
-                                            operation['consecutive_errors'] += 1
-                                        
-                                        # Enhanced retry error handling
-                                        if "Rate limit" in str(retry_error):
-                                            logging.error(f"Rate limit still active after wait for {username}: {error_msg}")
-                                            operation['notes'].append(f"Rate limit retry failed - limit still active")
-                                        else:
-                                            logging.error(f"Retry also failed for {username}: {error_msg}")
-                                        
-                                        track_unfollow_attempt(False)
-                        except Exception as rate_error:
-                            rate_error_msg = str(rate_error)
-                            operation['error_count'] += 1
-                            logging.error(f"Error during rate limit handling: {rate_error_msg}")
-                            
-                            # Fallback rate limit handling when API status fails
-                            if "Network" in rate_error_msg or "Connection" in rate_error_msg:
-                                operation['consecutive_errors'] += 1
-                                operation['notes'] = operation.get('notes', [])
-                                operation['notes'].append(f"Rate limit handling failed due to network error: {rate_error_msg}")
-                                
-                                # Fallback: Use conservative 15-minute wait when status API fails
-                                fallback_wait = 15 * 60  # 15 minutes
-                                logging.info(f"Using fallback 15-minute wait due to rate limit API failure")
-                                operation['status'] = 'waiting_for_rate_limit_reset'
-                                operation['waiting_for_reset'] = True
-                                operation['reset_wait_seconds'] = fallback_wait
-                                operation['current_username'] = f"{username} (fallback rate limit wait)"
-                                
-                                # Fallback wait with cancellation support
-                                fallback_start = time.time()
-                                while time.time() - fallback_start < fallback_wait:
-                                    if operation['status'] == 'cancelled':
-                                        break
-                                    time.sleep(10)  # 10-second intervals for fallback
-                                    operation['reset_wait_seconds'] = max(0, fallback_wait - (time.time() - fallback_start))
-                                
-                                if operation['status'] != 'cancelled':
-                                    operation['status'] = 'running'
-                                    operation['waiting_for_reset'] = False
-                                    operation['notes'].append(f"Fallback wait completed, resuming batch")
-                            else:
-                                # Non-network error in rate limit handling
-                                operation['notes'] = operation.get('notes', [])
-                                operation['notes'].append(f"Rate limit handling error: {rate_error_msg}")
-                    
-                    # Track failed attempt if not already tracked
-                    if not success and not retry_attempted:
-                        track_unfollow_attempt(False)
-                        
-                        # Check if we should pause batch due to repeated failures
-                        if operation['consecutive_errors'] >= 3 and "Rate limit" not in error_msg:
-                            logging.warning(f"Multiple consecutive errors ({operation['consecutive_errors']}) - adding stability pause")
-                            operation['notes'] = operation.get('notes', [])
-                            operation['notes'].append(f"Stability pause after {operation['consecutive_errors']} consecutive errors")
-                            time.sleep(60)  # 1-minute stability pause
-                
-                if success:
-                    operation['results'].append({'username': username, 'success': True})
-                    operation['success_count'] += 1
-                    operation['successful_usernames'] = operation.get('successful_usernames', [])
-                    operation['successful_usernames'].append(username)
-                    operation['consecutive_errors'] = 0  # Reset consecutive error count on success
-                    logging.info(f"Slow batch {operation_id}: unfollowed @{username} ({i+1}/{len(usernames)})")
+                        error_msg = "Not following this account"
+                        logging.info(f"ℹ️ Cannot unfollow @{username} - not following")
                 else:
-                    failure_reason = error_msg or 'Unfollow failed'
-                    operation['results'].append({'username': username, 'success': False, 'error': failure_reason})
-                    operation['failed_count'] += 1
-                
+                    error_msg = "User not found"
+                    logging.warning(f"⚠️ User @{username} not found")
+                    
             except Exception as e:
                 error_msg = str(e)
-                operation['error_count'] += 1
-                operation['last_error'] = error_msg
-                
-                # Categorize the outer exception for better debugging
-                if "Network" in error_msg or "Connection" in error_msg or "timeout" in error_msg.lower():
-                    operation['consecutive_errors'] += 1
-                    logging.error(f"Network error in batch {operation_id} for @{username}: {error_msg}")
-                elif "Memory" in error_msg or "memory" in error_msg.lower():
-                    logging.critical(f"Memory error in batch {operation_id} for @{username}: {error_msg}")
-                    operation['notes'] = operation.get('notes', [])
-                    operation['notes'].append(f"Memory error detected: {error_msg}")
-                else:
-                    logging.error(f"Slow batch {operation_id}: error unfollowing @{username}: {error_msg}")
-                
-                operation['results'].append({'username': username, 'success': False, 'error': error_msg})
+                track_unfollow_attempt(False)
+                logging.error(f"❌ Error unfollowing @{username}: {error_msg}")
+            
+            # Layer 1: Simple result tracking
+            if success:
+                operation['results'].append({'username': username, 'success': True})
+                operation['success_count'] += 1
+                operation['successful_usernames'] = operation.get('successful_usernames', [])
+                operation['successful_usernames'].append(username)
+            else:
+                operation['results'].append({'username': username, 'success': False, 'error': error_msg or 'Unfollow failed'})
                 operation['failed_count'] += 1
             
-            # Update progress with real-time timestamp
-            operation['completed_count'] = i + 1
-            operation['last_update'] = time.time()
-            operation['last_activity'] = datetime.now().strftime('%H:%M:%S')
-            
-            # Log unfollow completion for frontend detection
-            logging.info(f"UNFOLLOW_COMPLETED: {operation_id} - User {i+1}/{len(usernames)} - {operation['completed_count']} total completed")
-            
-            # Add timestamp and trigger notification
+            # Layer 1: Simple completion notification
+            operation['completed_count'] = i + 1  # Ensure completed count is updated
             operation['last_completion_time'] = time.time()
-            operation['completion_pending'] = True  # Flag for frontend to detect
+            operation['completion_pending'] = True
+            logging.info(f"UNFOLLOW_COMPLETED: {operation_id} - {i+1}/{len(usernames)} processed")
             
-            # Long-running operation stability checks
-            elapsed_hours = (time.time() - operation['start_time']) / 3600
-            if elapsed_hours > 12:  # After 12 hours of operation
-                # Periodic memory and stability logging
-                if (i + 1) % 50 == 0:  # Every 50 users
-                    logging.info(f"Long-running batch {operation_id}: {elapsed_hours:.1f}h elapsed, {operation['success_count']}/{i+1} successful")
-                    
-                # Trim old result entries to prevent excessive memory usage
-                if len(operation['results']) > 1000:  # Keep last 1000 results
-                    operation['results'] = operation['results'][-1000:]
-                    operation['notes'] = operation.get('notes', [])
-                    operation['notes'].append(f"Trimmed old results at user {i+1} for memory management")
-            
-            # Wait specified interval before next unfollow (except for the last one)
+            # Layer 2: Smart wait based on error classification (except for last user)
             if i < len(usernames) - 1 and operation['status'] != 'cancelled':
-                wait_seconds = interval_minutes * 60
-                operation['next_unfollow_time'] = time.time() + wait_seconds
+                # Debug: Log classification inputs (can be removed after Layer 2 verification)
+                logging.info(f"🔍 Layer 2 Classification: success={success}, error_msg='{error_msg}', username=@{username}")
+                error_type, classified_wait = classify_unfollow_error(error_msg, success)
+                operation['next_unfollow_time'] = time.time() + classified_wait
                 
-                # Wait in small increments to allow for cancellation
-                for wait_interval in range(wait_seconds):
+                if classified_wait == 5:
+                    logging.info(f"⚡ {error_type.upper()} error - waiting 5 seconds before next unfollow...")
+                else:
+                    wait_minutes = classified_wait // 60
+                    logging.info(f"⏳ {error_type.upper()} - waiting {wait_minutes} minutes before next unfollow...")
+                
+                # Wait in 1-second increments to allow cancellation
+                for second in range(classified_wait):
                     if operation['status'] == 'cancelled':
                         break
                     time.sleep(1)
+                    
+                    # Layer 2: Progress updates during fast waits (5 seconds) for responsive UI
+                    if classified_wait == 5:
+                        operation['last_completion_time'] = time.time()
+                        operation['completion_pending'] = True
         
-        # Mark as completed or handle cancellation cleanup
+        # Layer 1: Simple completion handling
         if operation['status'] == 'cancelled':
-            # Clean cancellation handling
             operation['end_time'] = time.time()
-            operation['cancelled_at_user'] = operation.get('current_index', 0)
-            operation['notes'] = operation.get('notes', [])
-            operation['notes'].append(f"Operation cancelled at user {operation['cancelled_at_user'] + 1}/{len(usernames)}")
-            logging.info(f"Slow batch {operation_id} cancelled: {operation['success_count']} successful, {operation['failed_count']} failed before cancellation")
+            logging.info(f"Batch {operation_id} cancelled at user {i+1}/{len(usernames)}")
         else:
             operation['status'] = 'completed'
             operation['end_time'] = time.time()
-            logging.info(f"Slow batch {operation_id} completed: {operation['success_count']} successful, {operation['failed_count']} failed, {operation['error_count']} total errors")
+            logging.info(f"✅ Batch {operation_id} completed: {operation['success_count']} successful, {operation['failed_count']} failed")
+        
+        # Start next queued batch
+        start_next_queued_batch()
         
     except Exception as e:
-        critical_error = str(e)
-        logging.critical(f"Critical error in slow batch worker for {operation_id}: {critical_error}")
+        # Layer 1: Simple error handling
+        logging.critical(f"Critical error in batch {operation_id}: {str(e)}")
         
-        # Ensure operation object exists before updating it
         if operation is not None:
             operation['status'] = 'error'
-            operation['error'] = critical_error
+            operation['error'] = str(e)
             operation['end_time'] = time.time()
-            operation['notes'] = operation.get('notes', [])
-            operation['notes'].append(f"Critical worker error: {critical_error}")
-        else:
-            # Operation object doesn't exist - log and try to create minimal error state
-            logging.critical(f"Operation {operation_id} not accessible for error reporting")
-            if operation_id in slow_batch_operations:
-                slow_batch_operations[operation_id]['status'] = 'error'
-                slow_batch_operations[operation_id]['error'] = f"Critical worker error: {critical_error}"
+        
+        # Try to start next batch
+        start_next_queued_batch()
 
 @app.route('/unfollow/slow-batch', methods=['POST'])
 def unfollow_slow_batch():
@@ -662,6 +635,11 @@ def unfollow_slow_batch():
         if not usernames:
             return jsonify({'error': 'No users selected'}), 400
         
+        # Check batch limits
+        active_batch_count = get_active_batch_count(session['user_id'])
+        if active_batch_count >= MAX_TOTAL_BATCHES:
+            return jsonify({'error': f'Maximum {MAX_TOTAL_BATCHES} batches allowed (running + queued). Complete or cancel existing batches first.'}), 400
+        
         # Enforce limits based on batch type
         if batch_type == 'test' and len(usernames) > 5:
             return jsonify({'error': 'Maximum 5 users allowed for test batch'}), 400
@@ -675,12 +653,19 @@ def unfollow_slow_batch():
         # Create operation ID
         operation_id = f"{batch_type}_batch_{interval_minutes}min_{int(time.time())}_{session['user_id']}"
         
+        # Check if a batch is currently running (across all users)
+        running_batch = None
+        for operation in slow_batch_operations.values():
+            if operation['status'] in ['running', 'waiting_for_rate_limit_reset']:
+                running_batch = operation
+                break
+        
         # Initialize operation tracking
         slow_batch_operations[operation_id] = {
             'id': operation_id,
             'user_id': session['user_id'],
             'username': session.get('username', 'Unknown'),
-            'status': 'starting',
+            'status': 'queued' if running_batch else 'starting',
             'interval_minutes': interval_minutes,
             'total_count': len(usernames),
             'completed_count': 0,
@@ -694,16 +679,47 @@ def unfollow_slow_batch():
             'end_time': None,
             'last_update': time.time(),
             'next_unfollow_time': None,
-            'estimated_completion': time.time() + ((len(usernames) - 1) * interval_minutes * 60)
+            'estimated_completion': time.time() + ((len(usernames) - 1) * interval_minutes * 60),
+            'queue_position': len(batch_queue) + 1 if running_batch else 0,
+            # Simplified - no complex timing tracking for now
         }
         
-        # Start background thread
-        thread = threading.Thread(
-            target=slow_batch_worker, 
-            args=(operation_id, session['user_id'], usernames, interval_minutes),
-            daemon=True
-        )
-        thread.start()
+        if running_batch:
+            # Add to queue
+            batch_queue.append({
+                'operation_id': operation_id,
+                'user_id': session['user_id'],
+                'usernames': usernames,
+                'interval_minutes': interval_minutes
+            })
+            
+            queue_position = len(batch_queue)
+            estimated_wait_time = 0
+            
+            # Calculate estimated wait time based on running batch
+            if running_batch['total_count'] > running_batch['completed_count']:
+                remaining_unfollows = running_batch['total_count'] - running_batch['completed_count']
+                estimated_wait_time = remaining_unfollows * interval_minutes
+            
+            logging.info(f"Queued batch {operation_id} at position {queue_position}. Current batch: {running_batch['id']}")
+            
+            return jsonify({
+                'success': True,
+                'operation_id': operation_id,
+                'queued': True,
+                'queue_position': queue_position,
+                'message': f'Batch queued at position {queue_position}. Will start when current batch completes.',
+                'estimated_wait_hours': round(estimated_wait_time / 60, 1),
+                'current_running_batch': running_batch['id']
+            })
+        else:
+            # Start immediately
+            thread = threading.Thread(
+                target=slow_batch_worker, 
+                args=(operation_id, session['user_id'], usernames, interval_minutes),
+                daemon=True
+            )
+            thread.start()
         
         logging.info(f"Started {interval_minutes}-minute slow batch operation {operation_id} for {len(usernames)} users")
         
@@ -813,6 +829,9 @@ def cancel_slow_batch(operation_id):
         elapsed_time = operation['end_time'] - operation.get('start_time', operation['end_time'])
         logging.info(f"Cancelled slow batch operation {operation_id} after {elapsed_time:.1f}s (was: {previous_status})")
         
+        # Start next queued batch after cancellation
+        start_next_queued_batch()
+        
         return jsonify({
             'success': True,
             'message': 'Slow batch operation cancelled',
@@ -827,7 +846,6 @@ def cancel_slow_batch(operation_id):
                 'completed': operation['completed_count'],
                 'successful': operation['success_count'],
                 'failed': operation['failed_count'],
-                'error_count': operation.get('error_count', 0)
             }
         })
         
@@ -854,7 +872,8 @@ def list_slow_batch_operations():
                     'completed_count': operation['completed_count'],
                     'success_count': operation['success_count'],
                     'start_time': datetime.fromtimestamp(operation['start_time']).strftime('%Y-%m-%d %H:%M:%S') if operation['start_time'] else None,
-                    'estimated_completion': datetime.fromtimestamp(operation['estimated_completion']).strftime('%Y-%m-%d %H:%M:%S') if operation.get('estimated_completion') else None
+                    'estimated_completion': datetime.fromtimestamp(operation['estimated_completion']).strftime('%Y-%m-%d %H:%M:%S') if operation.get('estimated_completion') else None,
+                    'queue_position': operation.get('queue_position', 0)
                 })
         
         # Collect all successful unfollows from user's operations
@@ -878,7 +897,8 @@ def list_slow_batch_operations():
         
         return jsonify({
             'operations': user_operations,
-            'active_count': len([op for op in user_operations if op['status'] in ['starting', 'running']]),
+            'active_count': len([op for op in user_operations if op['status'] in ['starting', 'running', 'queued']]),
+            'queue_length': len(batch_queue),
             'successful_unfollows': successful_unfollows,
             'completion_notifications': completion_notifications
         })
@@ -886,6 +906,265 @@ def list_slow_batch_operations():
     except Exception as e:
         logging.error(f"List slow batch operations error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/debug/test-following-permissions')
+def test_following_permissions():
+    """Test following status check with main app's authentication."""
+    if 'user_id' not in session:
+        return jsonify({'error': 'Not authenticated'}), 401
+    
+    user_id = session['user_id']
+    scott_id = "931286316"  # ScottPresler's ID
+    
+    results = {
+        'user_info': {
+            'your_user_id': user_id,
+            'target_user_id': scott_id,
+            'target_username': 'ScottPresler'
+        },
+        'tests': []
+    }
+    
+    # Test 1: Direct following relationship check with detailed error info
+    try:
+        logging.info(f"🧪 Testing direct following check: {user_id} → {scott_id}")
+        
+        # Make direct API call to get detailed response
+        response = x_client._make_api_request('GET', f'/users/{user_id}/following/{scott_id}', api_endpoint_type='user_lookup')
+        
+        test_result = {
+            'test': 'Direct Following Relationship Check',
+            'endpoint': f'/users/{user_id}/following/{scott_id}',
+            'http_status': response.status_code,
+            'raw_response': response.text,
+            'notes': 'Layer 2 pre-check endpoint'
+        }
+        
+        if response.status_code == 200:
+            data = response.json()
+            if 'data' in data and 'following' in data['data']:
+                following_status = data['data']['following']
+                test_result.update({
+                    'result': following_status,
+                    'status': 'success',
+                    'parsed_data': data
+                })
+            else:
+                test_result.update({
+                    'result': None,
+                    'status': 'unexpected_format',
+                    'parsed_data': data
+                })
+        elif response.status_code == 403:
+            test_result.update({
+                'result': None,
+                'status': 'permission_denied',
+                'solution': 'Need Elevated Access in X Developer Portal'
+            })
+        else:
+            test_result.update({
+                'result': None,
+                'status': 'api_error',
+                'error_details': f"HTTP {response.status_code}"
+            })
+            
+        results['tests'].append(test_result)
+        
+    except Exception as e:
+        results['tests'].append({
+            'test': 'Direct Following Relationship Check',
+            'endpoint': f'/users/{user_id}/following/{scott_id}',
+            'result': None,
+            'status': 'exception',
+            'error': str(e),
+            'notes': 'Layer 2 pre-check failed with exception'
+        })
+    
+    # Test 2: Get user info to verify authentication works
+    try:
+        logging.info(f"🧪 Testing user info endpoint")
+        response = x_client._make_api_request('GET', '/users/me', api_endpoint_type='user_lookup')
+        
+        if response.status_code == 200:
+            data = response.json()
+            results['tests'].append({
+                'test': 'User Info Check',
+                'endpoint': '/users/me',
+                'result': {
+                    'username': data['data']['username'],
+                    'id': data['data']['id']
+                },
+                'status': 'success',
+                'notes': 'Basic authentication working'
+            })
+        else:
+            results['tests'].append({
+                'test': 'User Info Check',
+                'endpoint': '/users/me',
+                'result': None,
+                'status': 'failed',
+                'error': f"Status {response.status_code}: {response.text}",
+                'notes': 'Basic authentication failed'
+            })
+            
+    except Exception as e:
+        results['tests'].append({
+            'test': 'User Info Check',
+            'endpoint': '/users/me',
+            'result': None,
+            'status': 'error',
+            'error': str(e),
+            'notes': 'Authentication error'
+        })
+    
+    # Test 3: Try getting your own following list (might work with basic permissions)
+    try:
+        logging.info(f"🧪 Testing following list endpoint")
+        response = x_client._make_api_request('GET', f'/users/{user_id}/following?max_results=10', api_endpoint_type='user_lookup')
+        
+        test_result = {
+            'test': 'Following List Check (Alternative)',
+            'endpoint': f'/users/{user_id}/following?max_results=10',
+            'http_status': response.status_code,
+            'raw_response': response.text[:500] + '...' if len(response.text) > 500 else response.text,
+            'notes': 'Alternative method - check if Scott is in your following list'
+        }
+        
+        if response.status_code == 200:
+            data = response.json()
+            following_users = data.get('data', [])
+            scott_in_list = any(user.get('id') == scott_id for user in following_users)
+            
+            test_result.update({
+                'result': scott_in_list,
+                'status': 'success',
+                'following_count': len(following_users),
+                'scott_found': scott_in_list,
+                'note': 'Limited to first 10 users for testing'
+            })
+        else:
+            test_result.update({
+                'result': None,
+                'status': 'failed' if response.status_code == 403 else 'api_error'
+            })
+            
+        results['tests'].append(test_result)
+        
+    except Exception as e:
+        results['tests'].append({
+            'test': 'Following List Check (Alternative)',
+            'endpoint': f'/users/{user_id}/following?max_results=10',
+            'result': None,
+            'status': 'exception',
+            'error': str(e),
+            'notes': 'Alternative method failed'
+        })
+    
+    # Test 4: Try getting target user profile (might show relationship info)
+    try:
+        logging.info(f"🧪 Testing target user profile")
+        response = x_client._make_api_request('GET', f'/users/{scott_id}?user.fields=public_metrics', api_endpoint_type='user_lookup')
+        
+        test_result = {
+            'test': 'Target User Profile Check',
+            'endpoint': f'/users/{scott_id}',
+            'http_status': response.status_code,
+            'notes': 'Check if user profile contains relationship indicators'
+        }
+        
+        if response.status_code == 200:
+            data = response.json()
+            test_result.update({
+                'result': data.get('data', {}),
+                'status': 'success',
+                'username': data.get('data', {}).get('username'),
+                'note': 'Basic profile info - no relationship data with basic permissions'
+            })
+        else:
+            test_result.update({
+                'result': None,
+                'status': 'failed',
+                'raw_response': response.text
+            })
+            
+        results['tests'].append(test_result)
+        
+    except Exception as e:
+        results['tests'].append({
+            'test': 'Target User Profile Check',
+            'endpoint': f'/users/{scott_id}',
+            'result': None,
+            'status': 'exception',
+            'error': str(e),
+            'notes': 'Profile check failed'
+        })
+    
+    # Summary and recommendations based on all tests
+    following_test = next((t for t in results['tests'] if 'Following Relationship' in t['test']), None)
+    following_list_test = next((t for t in results['tests'] if 'Following List' in t['test']), None)
+    
+    recommendations = []
+    
+    # Check direct following relationship result
+    if following_test:
+        if following_test.get('status') == 'success':
+            recommendations.append('✅ Direct following check works - Layer 2 pre-check ready!')
+        elif following_test.get('status') == 'permission_denied':
+            recommendations.append('🔐 Direct following check requires Elevated Access')
+        elif following_test.get('http_status') == 403:
+            recommendations.append('🔐 HTTP 403: Need elevated permissions for following relationships')
+    
+    # Check alternative following list result  
+    if following_list_test:
+        if following_list_test.get('status') == 'success':
+            recommendations.append('✅ Following list works - Can use alternative method (limited to recent follows)')
+        elif following_list_test.get('http_status') == 403:
+            recommendations.append('❌ Following list also requires elevated permissions')
+        else:
+            recommendations.append('⚠️ Following list method failed')
+    
+    # Overall recommendation
+    if any('✅' in rec for rec in recommendations):
+        results['recommendation'] = 'Layer 2 following pre-check possible with current setup!'
+        results['next_steps'] = ['Implement working method in batch processing', 'Test with real batch']
+    elif any('🔐' in rec for rec in recommendations):
+        results['recommendation'] = 'Apply for Elevated Access in X Developer Portal for full Layer 2 functionality'
+        results['next_steps'] = [
+            'Go to https://developer.twitter.com/en/portal/dashboard',
+            'Apply for Elevated Access',
+            'Explain use case: "Building unfollow tool for account management"',
+            'Wait 1-2 days for approval'
+        ]
+    else:
+        results['recommendation'] = 'Simplify Layer 2 - Remove pre-check, keep smart timing benefits'
+        results['next_steps'] = [
+            'Remove following status pre-check from batch worker',
+            'Keep Layer 2 smart timing (5s for errors, 15min for success)',
+            'Still get 60%+ time savings for error-heavy batches',
+            'Accept some false positives for simplicity'
+        ]
+    
+    results['detailed_analysis'] = recommendations
+    
+    return jsonify(results)
+
+@app.route('/debug/<path:endpoint>')
+def debug_info(endpoint):
+    """Info about debug functionality moved to separate test file."""
+    if endpoint == 'test-following-permissions':
+        return test_following_permissions()
+    
+    return jsonify({
+        'message': 'Debug functionality moved to standalone test file',
+        'debug_file': 'debug_tests.py',
+        'available_functions': [
+            'test_layer2_classification()',
+            'performance_simulation()',
+        ],
+        'usage': 'Run: python debug_tests.py',
+        'description': 'Tests Layer 2 logic without API calls or web server',
+        'live_test': 'GET /debug/test-following-permissions (requires authentication)'
+    })
 
 @app.errorhandler(404)
 def not_found(error):

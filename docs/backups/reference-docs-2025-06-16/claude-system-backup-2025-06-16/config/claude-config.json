@@ -1,0 +1,125 @@
+{
+  "project": {
+    "name": "X Unfollow App",
+    "type": "web_application",
+    "technology_stack": "Python Flask + JavaScript + Bootstrap + X API v2",
+    "development_methodology": "layered_systematic_enhancement",
+    "created_date": "2025-06-16T00:00:00Z"
+  },
+  "claude_integration": {
+    "version": "1.0",
+    "context_management": "automatic",
+    "session_tracking": "enabled",
+    "layer_monitoring": "enabled",
+    "progress_analytics": "enabled"
+  },
+  "development_standards": {
+    "layered_approach": {
+      "total_layers": 5,
+      "current_layer": 2,
+      "layer_isolation": "strict",
+      "foundation_preservation": "mandatory"
+    },
+    "documentation_requirements": {
+      "real_time_logging": "mandatory",
+      "change_tracking": "complete",
+      "decision_recording": "required",
+      "session_logs": "detailed"
+    },
+    "code_quality": {
+      "testing_required": "layer_verification",
+      "regression_prevention": "strict",
+      "performance_measurement": "quantified",
+      "user_impact_tracking": "enabled"
+    }
+  },
+  "file_organization": {
+    "docs_structure": "universal_standards",
+    "active_files": "docs/active/",
+    "reference_files": "docs/reference/",
+    "technical_logs": "docs/technical/daily-logs/",
+    "progress_tracking": "docs/progress/session-logs/",
+    "claude_context": ".claude/context/",
+    "claude_prompts": ".claude/prompts/"
+  },
+  "session_automation": {
+    "commands": {
+      "session_start": "GO",
+      "progress_mini": "consol",
+      "progress_session": "end sesh", 
+      "progress_daily": "end day",
+      "technical_mini": "code",
+      "technical_session": "end code",
+      "technical_daily": "end tech",
+      "file_organization": "clean vault",
+      "next_session_prep": "prep next session"
+    },
+    "command_behavior": "functional_file_operations",
+    "implementation_status": {
+      "go": "implemented",
+      "consol": "implemented", 
+      "end_sesh": "needs_implementation",
+      "end_day": "needs_implementation",
+      "code": "needs_implementation",
+      "end_code": "needs_implementation",
+      "end_tech": "needs_implementation",
+      "clean_vault": "needs_implementation",
+      "prep_next_session": "needs_implementation"
+    },
+    "automation_level": "enhanced",
+    "safety_features": "enabled",
+    "backup_creation": "automatic",
+    "rollback_support": "available",
+    "command_reference": ".claude/context/session-commands.json"
+  },
+  "x_api_specific": {
+    "rate_limit_compliance": "15_minute_intervals",
+    "authentication": "oauth2_pkce",
+    "error_handling": "smart_classification",
+    "batch_processing": "sequential_queue_management",
+    "user_experience": "csv_upload_batch_monitoring"
+  },
+  "layer_specific_config": {
+    "layer_1": {
+      "status": "completed",
+      "focus": "clean_basic_flow",
+      "achievements": "71% complexity reduction",
+      "stability": "excellent"
+    },
+    "layer_2": {
+      "status": "completed",
+      "focus": "error_classification", 
+      "target": "app.py line ~450",
+      "achieved_benefit": "60.3% time reduction (exceeded target)",
+      "completion_date": "2025-06-16"
+    },
+    "layer_3": {
+      "status": "planned",
+      "focus": "network_resilience",
+      "depends_on": "layer_2_completion"
+    },
+    "layer_4": {
+      "status": "planned", 
+      "focus": "rate_limit_batch_management",
+      "depends_on": "layer_3_completion"
+    },
+    "layer_5": {
+      "status": "planned",
+      "focus": "authentication_management",
+      "depends_on": "layer_4_completion"
+    }
+  },
+  "quality_metrics": {
+    "complexity_reduction": "71%",
+    "function_count": 23,
+    "test_coverage": "layer_1_complete",
+    "documentation_completeness": "excellent",
+    "user_experience": "simple_predictable"
+  },
+  "context_sync": {
+    "auto_update": true,
+    "sync_frequency": "per_session",
+    "backup_retention": "30_days",
+    "audit_trail": "complete"
+  }
+}
