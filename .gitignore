@@ -38,6 +38,7 @@ venv.bak/
 # Development and documentation
 .claude/
 .obsidian/
+docs/
 conversation_log.json
 *_log.json
 
