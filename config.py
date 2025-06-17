@@ -5,9 +5,13 @@ Contains API credentials, URLs, and constants.
 
 # X API Credentials - Set via environment variables for production
 import os
+from dotenv import load_dotenv
 
-CLIENT_ID = os.getenv("X_CLIENT_ID", "your_actual_client_id_here")
-CLIENT_SECRET = os.getenv("X_CLIENT_SECRET", "your_actual_client_secret_here")
+# Load environment variables from .env file
+load_dotenv()
+
+CLIENT_ID = os.getenv("X_CLIENT_ID")
+CLIENT_SECRET = os.getenv("X_CLIENT_SECRET")
 
 # TODO: Replace the placeholder values above with your actual X API credentials
 # Or set environment variables: export X_CLIENT_ID="your_client_id"

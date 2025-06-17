@@ -20,98 +20,99 @@
             </div>
         </div>
 
-        <!-- Authentication Status -->
+        {% if authenticated %}
+        <!-- Authentication & Rate Limit Status -->
         <div class="row mb-4">
-            <div class="col-12">
-                <div class="card">
-                    <div class="card-body">
-                        {% if authenticated %}
-                            <div class="d-flex align-items-center justify-content-between">
-                                <div>
-                                    <h5 class="card-title text-success">
-                                        <i class="fas fa-check-circle me-2"></i>Authenticated
-                                    </h5>
-                                    <p class="card-text">
-                                        Logged in as: <strong id="username-display">{{ session.get('username', 'User') }}</strong>
-                                        <br>
-                                        <small class="text-muted">User ID: {{ user_id }}</small>
-                                    </p>
-                                </div>
-                                <div>
-                                    <a href="/logout" class="btn btn-outline-secondary">
-                                        <i class="fas fa-sign-out-alt me-1"></i>Logout
-                                    </a>
-                                </div>
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-body d-flex align-items-center justify-content-between">
+                        <div>
+                            <h6 class="card-title text-success mb-1">
+                                <i class="fas fa-check-circle me-2"></i>Authenticated
+                            </h6>
+                            <div class="small">
+                                <strong id="username-display">{{ session.get('username', 'User') }}</strong>
+                                <br>
+                                <span class="text-muted">ID: {{ user_id }}</span>
                             </div>
-                        {% else %}
-                            <div class="text-center">
-                                <h5 class="card-title text-warning">
-                                    <i class="fas fa-exclamation-triangle me-2"></i>Not Authenticated
-                                </h5>
-                                <p class="card-text mb-3">Please log in with your X account to use the unfollow features.</p>
-                                
-                                <!-- Show login error if present -->
-                                <div id="login-error-container" class="d-none mb-3">
-                                    <div class="alert alert-danger" role="alert">
-                                        <div class="d-flex align-items-center">
-                                            <i class="fas fa-exclamation-circle me-2"></i>
-                                            <div>
-                                                <strong>Login Failed:</strong>
-                                                <div id="login-error-message"></div>
-                                                <small id="login-error-description" class="d-block text-muted mt-1"></small>
-                                            </div>
-                                        </div>
-                                        <hr>
-                                        <div class="mb-0">
-                                            <strong>Troubleshooting:</strong>
-                                            <ul class="small mb-0 mt-1">
-                                                <li>Verify your X Developer Portal app is set to <strong>Web App</strong> type</li>
-                                                <li>Ensure callback URL is set to: <code>http://localhost:5001/callback</code></li>
-                                                <li>Check that your app is attached to a <strong>Project</strong></li>
-                                                <li>Verify Client ID and Secret are correct in config.py</li>
-                                            </ul>
-                                        </div>
-                                    </div>
-                                </div>
-                                
-                                <a href="/login" class="btn btn-primary btn-lg">
-                                    <i class="fab fa-x-twitter me-2"></i>Login with X
-                                </a>
-                            </div>
-                        {% endif %}
+                        </div>
+                        <div>
+                            <a href="/logout" class="btn btn-outline-secondary btn-sm">
+                                <i class="fas fa-sign-out-alt me-1"></i>Logout
+                            </a>
+                        </div>
                     </div>
                 </div>
             </div>
-        </div>
-
-        {% if authenticated %}
-        <!-- Rate Limit Status -->
-        <div class="row mb-4">
-            <div class="col-12">
-                <div class="card">
-                    <div class="card-header">
-                        <h5 class="mb-0"><i class="fas fa-tachometer-alt me-2"></i>Rate Limit Status</h5>
-                    </div>
-                    <div class="card-body">
-                        <div class="row text-center">
-                            <div class="col-md-6">
-                                <div class="border-end">
-                                    <h6>Unfollows</h6>
-                                    <span id="unfollow-rate-limit" class="badge bg-success">50/50</span>
-                                    <small class="d-block text-muted">per 15 min</small>
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-body d-flex align-items-center justify-content-center">
+                        <div class="text-center">
+                            <h6 class="card-title mb-1">
+                                <i class="fas fa-tachometer-alt me-2"></i>API Rate Limits
+                            </h6>
+                            <div class="row">
+                                <div class="col-6">
+                                    <span class="small text-muted">Per Hour</span><br>
+                                    <span id="unfollow-rate-limit-hour" class="badge bg-secondary">Loading...</span>
                                 </div>
-                            </div>
-                            <div class="col-md-6">
-                                <h6>Auth Attempts</h6>
-                                <span id="auth-attempts" class="badge bg-info">0</span>
-                                <small class="d-block text-muted">this session</small>
+                                <div class="col-6">
+                                    <span class="small text-muted">Per Day</span><br>
+                                    <span id="unfollow-rate-limit-day" class="badge bg-secondary">Loading...</span>
+                                </div>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
+        {% else %}
+        <!-- Authentication Status (Not Logged In) -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-body">
+                        <div class="text-center">
+                            <h5 class="card-title text-warning">
+                                <i class="fas fa-exclamation-triangle me-2"></i>Not Authenticated
+                            </h5>
+                            <p class="card-text mb-3">Please log in with your X account to use the unfollow features.</p>
+                            
+                            <!-- Show login error if present -->
+                            <div id="login-error-container" class="d-none mb-3">
+                                <div class="alert alert-danger" role="alert">
+                                    <div class="d-flex align-items-center">
+                                        <i class="fas fa-exclamation-circle me-2"></i>
+                                        <div>
+                                            <strong>Login Failed:</strong>
+                                            <div id="login-error-message"></div>
+                                            <small id="login-error-description" class="d-block text-muted mt-1"></small>
+                                        </div>
+                                    </div>
+                                    <hr>
+                                    <div class="mb-0">
+                                        <strong>Troubleshooting:</strong>
+                                        <ul class="small mb-0 mt-1">
+                                            <li>Verify your X Developer Portal app is set to <strong>Web App</strong> type</li>
+                                            <li>Ensure callback URL is set to: <code>http://localhost:5001/callback</code></li>
+                                            <li>Check that your app is attached to a <strong>Project</strong></li>
+                                            <li>Verify Client ID and Secret are correct in config.py</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <a href="/login" class="btn btn-primary btn-lg">
+                                <i class="fab fa-x-twitter me-2"></i>Login with X
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
 
+        {% if authenticated %}
         <!-- Status Messages -->
         <div class="row mb-4">
             <div class="col-12">
@@ -135,55 +136,106 @@
             </div>
         </div>
 
-        <!-- Single Unfollow -->
+        <!-- Single Unfollow & Username Extract -->
         <div class="row mb-4">
-            <div class="col-12">
-                <div class="card">
+            <div class="col-md-6">
+                <div class="card h-100">
                     <div class="card-header">
-                        <h5 class="mb-0"><i class="fas fa-user-minus me-2"></i>Single Unfollow</h5>
+                        <h6 class="mb-0"><i class="fas fa-user-minus me-2"></i>Single Unfollow</h6>
                     </div>
-                    <div class="card-body">
-                        <form id="single-unfollow-form">
-                            <div class="row">
-                                <div class="col-md-8">
-                                    <div class="mb-3">
-                                        <label for="username-input" class="form-label">Username or User ID</label>
-                                        <div class="input-group">
-                                            <span class="input-group-text">@</span>
-                                            <input type="text" class="form-control" id="username-input" 
-                                                   placeholder="Enter username (without @) or user ID" required>
-                                        </div>
-                                        <div class="form-text">Enter a username (e.g., "elonmusk") or user ID</div>
-                                    </div>
+                    <div class="card-body d-flex flex-column">
+                        <form id="single-unfollow-form" class="flex-grow-1 d-flex flex-column">
+                            <div class="mb-3 flex-grow-1">
+                                <label for="username-input" class="form-label">Username or User ID</label>
+                                <div class="input-group">
+                                    <span class="input-group-text">@</span>
+                                    <input type="text" class="form-control" id="username-input" 
+                                           placeholder="username or ID" required>
                                 </div>
-                                <div class="col-md-4 d-flex align-items-end">
-                                    <button type="submit" class="btn btn-warning w-100" id="single-unfollow-btn">
-                                        <i class="fas fa-user-minus me-2"></i>Unfollow User
-                                    </button>
-                                </div>
+                                <div class="form-text small">Enter username or user ID</div>
                             </div>
+                            <button type="submit" class="btn btn-warning w-100 mt-auto" id="single-unfollow-btn">
+                                <i class="fas fa-user-minus me-2"></i>Unfollow User
+                            </button>
                         </form>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header">
+                        <h6 class="mb-0"><i class="fas fa-bug me-2"></i>Extract Usernames</h6>
+                    </div>
+                    <div class="card-body d-flex flex-column">
+                        <div class="mb-3 flex-grow-1">
+                            <label for="debug-text-input" class="form-label">Paste Username List</label>
+                            <textarea class="form-control flex-grow-1" id="debug-text-input" rows="3" 
+                                      placeholder="username1&#10;@username2&#10;username3" style="min-height: 80px;"></textarea>
+                            <div class="form-text small">
+                                One per line. @ symbols optional.
+                            </div>
+                        </div>
+                        <div class="mt-auto">
+                            <button type="button" class="btn btn-info w-100" id="extract-usernames-btn">
+                                <i class="fas fa-search me-1"></i>Extract Usernames
+                            </button>
+                            <div id="extracted-count" class="mt-2 text-muted d-none small">
+                                Found: <span id="extracted-number">0</span> usernames
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- CSV Import Batch Unfollow -->
+        <!-- Active Slow Batch Operations -->
+        <div class="row mb-4" id="slow-batch-operations-container" style="display: none;">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h6 class="mb-0"><i class="fas fa-clock me-2"></i>Active Slow Batch Operations</h6>
+                        <button type="button" class="btn btn-outline-secondary btn-sm" id="refresh-operations-btn">
+                            <i class="fas fa-refresh me-1"></i>Refresh
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div id="slow-batch-operations-list">
+                            <!-- Operations will be populated here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- CSV Import -->
         <div class="row mb-4">
             <div class="col-12">
                 <div class="card">
                     <div class="card-header">
-                        <h5 class="mb-0"><i class="fas fa-file-csv me-2"></i>CSV Import Batch Unfollow</h5>
+                        <h5 class="mb-0"><i class="fas fa-file-csv me-2"></i>CSV Import</h5>
                     </div>
                     <div class="card-body">
                         <!-- CSV Upload Section -->
-                        <div class="mb-4">
+                        <div class="mb-3">
                             <label for="csv-file-input" class="form-label">Upload CSV File with Usernames</label>
                             <input type="file" class="form-control" id="csv-file-input" accept=".csv,.txt">
                             <div class="form-text">
                                 CSV format: One username per line (without @). Example: username1, username2, username3
                             </div>
                         </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Batch Unfollow Operations -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0"><i class="fas fa-users-slash me-2"></i>Batch Unfollow Operations</h5>
+                    </div>
+                    <div class="card-body">
                         
                         <!-- CSV List Display -->
                         <div id="csv-list-container" class="d-none">
@@ -208,18 +260,29 @@
                                 </div>
                             </div>
                             
-                            <!-- Batch Operation Buttons -->
+                            <!-- Free API Tier Notice -->
+                            <div class="alert alert-info mb-3">
+                                <div class="d-flex align-items-center">
+                                    <i class="fas fa-info-circle me-2"></i>
+                                    <div class="small">
+                                        <strong>Free API Tier:</strong> Limited to very few unfollows per 15-minute window. 
+                                        Use 15-minute intervals to respect rate limits and avoid account restrictions.
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Realistic Batch Operation Buttons -->
                             <div class="row">
                                 <div class="col-md-6">
-                                    <button type="button" class="btn btn-warning w-100 mb-2" id="small-batch-btn">
-                                        <i class="fas fa-user-minus me-2"></i>Small Batch (Max 10)
-                                        <small class="d-block">1 second delay between unfollows</small>
+                                    <button type="button" class="btn btn-primary w-100 mb-2" id="test-batch-btn">
+                                        <i class="fas fa-flask me-2"></i>Test Batch
+                                        <small class="d-block">1-5 users • 15 min intervals</small>
                                     </button>
                                 </div>
                                 <div class="col-md-6">
-                                    <button type="button" class="btn btn-danger w-100 mb-2" id="full-batch-btn">
-                                        <i class="fas fa-users-slash me-2"></i>Full Batch (Max 50)
-                                        <small class="d-block">18 second delay between unfollows</small>
+                                    <button type="button" class="btn btn-success w-100 mb-2" id="regular-batch-btn">
+                                        <i class="fas fa-users-slash me-2"></i>Regular Batch  
+                                        <small class="d-block">Unlimited users • 15 min intervals</small>
                                     </button>
                                 </div>
                             </div>
@@ -236,31 +299,51 @@
             </div>
         </div>
 
-        <!-- Important Notes -->
+        <!-- App Features & Usage Guide -->
         <div class="row mb-4">
             <div class="col-12">
-                <div class="card border-warning">
-                    <div class="card-header bg-warning text-dark">
-                        <h5 class="mb-0"><i class="fas fa-exclamation-triangle me-2"></i>Important Information</h5>
+                <div class="card border-info">
+                    <div class="card-header bg-info text-white">
+                        <h5 class="mb-0"><i class="fas fa-info-circle me-2"></i>How to Use This App</h5>
                     </div>
                     <div class="card-body">
                         <div class="row">
                             <div class="col-md-6">
-                                <h6><i class="fas fa-shield-alt me-2"></i>Rate Limits</h6>
+                                <h6><i class="fas fa-upload me-2"></i>Getting Started</h6>
                                 <ul class="small">
-                                    <li>Maximum 50 unfollows per 15 minutes</li>
-                                    <li>Small batch: 1 second delay between requests</li>
-                                    <li>Full batch: 18 second delay between requests</li>
-                                    <li>Following list: Maximum 15 requests per 15 minutes</li>
+                                    <li><strong>CSV Import:</strong> Upload a file with usernames (one per line)</li>
+                                    <li><strong>Extract Usernames:</strong> Paste text from X following page</li>
+                                    <li><strong>Single Unfollow:</strong> Unfollow individual users instantly</li>
+                                    <li>Select which accounts to unfollow from your imported list</li>
                                 </ul>
                             </div>
                             <div class="col-md-6">
-                                <h6><i class="fas fa-info-circle me-2"></i>X Platform Limits</h6>
+                                <h6><i class="fas fa-cogs me-2"></i>Batch Operations</h6>
                                 <ul class="small">
-                                    <li>X limits to 400 follow/unfollow actions per day</li>
-                                    <li>Aggressive unfollowing may result in account restrictions</li>
-                                    <li>Use responsibly to avoid automation policy violations</li>
-                                    <li>This tool respects X API rate limits</li>
+                                    <li><strong>Test Batch:</strong> 1-5 users (15 min intervals)</li>
+                                    <li><strong>Regular Batch:</strong> Unlimited users (15 min intervals)</li>
+                                    <li>Designed for free API tier rate limits</li>
+                                    <li>Background processing with progress tracking</li>
+                                </ul>
+                            </div>
+                        </div>
+                        <div class="row mt-3">
+                            <div class="col-md-6">
+                                <h6><i class="fas fa-clock me-2"></i>Free Tier Optimized</h6>
+                                <ul class="small">
+                                    <li>15-minute intervals respect free API limits</li>
+                                    <li>Prevents account restrictions from rate limiting</li>
+                                    <li>Real-time progress tracking during operations</li>
+                                    <li>Can run for hours/days for large unfollow lists</li>
+                                </ul>
+                            </div>
+                            <div class="col-md-6">
+                                <h6><i class="fas fa-shield-alt me-2"></i>Safety Features</h6>
+                                <ul class="small">
+                                    <li>Respects X API rate limits to prevent account restrictions</li>
+                                    <li>Cancel slow batch operations at any time</li>
+                                    <li>Progress tracking for long-running operations</li>
+                                    <li>Secure OAuth 2.0 authentication with X</li>
                                 </ul>
                             </div>
                         </div>

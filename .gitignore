@@ -6,6 +6,7 @@ __pycache__/
 .Python
 env/
 venv/
+.venv/
 .env
 
 # Logs
@@ -41,3 +42,10 @@ instance/
 # Credentials (security)
 config_local.py
 secrets.json
+credentials.json
+client_secrets.json
+
+# Unfollow tracking files (contain user data)
+unfollow_tracking.json
+unfollow_queue.json
+unfollow_state.json

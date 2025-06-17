@@ -40,8 +40,10 @@ class XAPIClient:
         # Rate limit tracking - initialize with defaults
         self.rate_limits = {
             'following': {'remaining': 15, 'reset': 0, 'limit': 15},
-            'unfollow': {'remaining': 50, 'reset': 0, 'limit': 50}, 
-            'user_lookup': {'remaining': 300, 'reset': 0, 'limit': 300}
+            'unfollow': {'remaining': 'unknown', 'reset': 0, 'limit': 'unknown'}, 
+            'user_lookup': {'remaining': 300, 'reset': 0, 'limit': 300},
+            'unfollow_hourly': {'remaining': 'unknown', 'reset': 0, 'limit': 'unknown'},
+            'unfollow_daily': {'remaining': 'unknown', 'reset': 0, 'limit': 'unknown'}
         }
         
         # Load stored tokens
@@ -249,6 +251,11 @@ class XAPIClient:
         limit_info = self.rate_limits[endpoint]
         current_time = time.time()
         
+        # If rate limit is unknown, allow the request (we'll learn from the API response)
+        if limit_info['remaining'] == 'unknown' or limit_info['limit'] == 'unknown':
+            logging.info(f"Rate limit unknown for {endpoint}, allowing request to learn from API response")
+            return True
+        
         # Reset counters if window has passed
         if current_time > limit_info['reset']:
             limit_info['remaining'] = limit_info['limit']
@@ -271,14 +278,59 @@ class XAPIClient:
             limit = response.headers.get('x-rate-limit-limit')
             
             if endpoint in self.rate_limits:
-                # Update remaining count with validation
-                if remaining:
+                # If this is the first time we're getting data for this endpoint, initialize from API response
+                if self.rate_limits[endpoint]['remaining'] == 'unknown' or self.rate_limits[endpoint]['limit'] == 'unknown':
+                    if remaining and limit:
+                        remaining_count = int(remaining)
+                        limit_count = int(limit)
+                        current_time = time.time()
+                        
+                        # Initialize with API data, but adjust for the request we just made
+                        if 200 <= response.status_code < 300:
+                            # Successful request - API shows remaining AFTER this call
+                            self.rate_limits[endpoint]['remaining'] = remaining_count
+                        else:
+                            # Failed request - API shows remaining BEFORE this call
+                            self.rate_limits[endpoint]['remaining'] = remaining_count
+                        
+                        self.rate_limits[endpoint]['limit'] = limit_count
+                        self.rate_limits[endpoint]['reset'] = int(reset) if reset else current_time + 900
+                        
+                        logging.info(f"Initialized {endpoint} rate limits from API: {remaining_count}/{limit_count}, reset: {self.rate_limits[endpoint]['reset']}, status: {response.status_code}")
+                        return  # Don't continue with normal update logic since we just initialized
+                
+                # Normal rate limit update logic for known limits
+                # Decrement local counter for successful API calls (status 200-299)
+                if 200 <= response.status_code < 300:
+                    if isinstance(self.rate_limits[endpoint]['remaining'], int) and self.rate_limits[endpoint]['remaining'] > 0:
+                        self.rate_limits[endpoint]['remaining'] -= 1
+                        logging.info(f"Decremented {endpoint} rate limit: {self.rate_limits[endpoint]['remaining']}/{self.rate_limits[endpoint]['limit']} remaining")
+                
+                # Update remaining count from headers if available and valid
+                if remaining and isinstance(self.rate_limits[endpoint]['limit'], int):
                     remaining_count = int(remaining)
                     expected_limit = self.rate_limits[endpoint]['limit']
                     # Only update if the value makes sense for this endpoint
                     if remaining_count <= expected_limit:
-                        self.rate_limits[endpoint]['remaining'] = remaining_count
-                        logging.info(f"Updated {endpoint} rate limit: {remaining_count}/{expected_limit} remaining")
+                        # Only trust API headers in these cases:
+                        # 1. API shows higher count than local (we missed some resets)
+                        # 2. We got a 429 response (definitely rate limited)
+                        # 3. API count is very close to our local count (±2 difference)
+                        local_count = self.rate_limits[endpoint]['remaining']
+                        if isinstance(local_count, int):
+                            count_diff = abs(remaining_count - local_count)
+                            
+                            if (remaining_count > local_count or 
+                                response.status_code == 429 or 
+                                count_diff <= 2):
+                                self.rate_limits[endpoint]['remaining'] = remaining_count
+                                logging.info(f"Updated {endpoint} rate limit from API headers: {remaining_count}/{expected_limit} remaining")
+                            else:
+                                logging.info(f"Ignoring potentially incorrect API header: API={remaining_count}, Local={local_count} for {endpoint}")
+                        else:
+                            # Local count is unknown, trust API
+                            self.rate_limits[endpoint]['remaining'] = remaining_count
+                            logging.info(f"Updated {endpoint} rate limit from API headers: {remaining_count}/{expected_limit} remaining")
                 
                 # Update reset time
                 if reset:
@@ -483,23 +535,66 @@ class XAPIClient:
             logging.error(f"Error unfollowing user {target_user_id}: {str(e)}")
             return False
     
-    def get_rate_limit_status(self):
+    def get_rate_limit_status(self, refresh_from_api=False):
         """
         Get current rate limit status.
+        
+        Args:
+            refresh_from_api (bool): If True, fetch fresh rate limits from X API
         
         Returns:
             dict: Rate limit information
         """
+        if refresh_from_api:
+            self._refresh_rate_limits_from_api()
+        
+        # Calculate estimated hourly/daily limits for free tier using persistent tracking
+        current_time = time.time()
+        
+        # Try to get actual counts from persistent tracking
+        try:
+            from app import get_unfollow_stats
+            stats = get_unfollow_stats()
+            
+            # Use persistent tracking data for more accurate remaining counts
+            estimated_hourly = stats['hourly_limit']
+            estimated_daily = stats['daily_limit']
+            hourly_remaining = max(0, estimated_hourly - stats['hourly_successful'])
+            daily_remaining = max(0, estimated_daily - stats['daily_successful'])
+            
+        except (ImportError, Exception):
+            # Fallback to estimates if tracking not available
+            base_15min_limit = self.rate_limits['unfollow']['limit']
+            if base_15min_limit != 'unknown' and isinstance(base_15min_limit, int):
+                # Conservative estimates: assume rate limits apply across longer periods
+                estimated_hourly = min(base_15min_limit * 4, 4)  # 4 windows per hour, but cap at 4 for free tier
+                estimated_daily = min(base_15min_limit * 96, 50)  # 96 windows per day, but cap at 50 for free tier
+                
+                # Calculate remaining based on recent usage patterns
+                hourly_remaining = estimated_hourly
+                daily_remaining = estimated_daily
+            else:
+                # Use conservative free tier defaults when unknown
+                estimated_hourly = 4
+                estimated_daily = 50
+                hourly_remaining = 'unknown'
+                daily_remaining = 'unknown'
+        
         return {
-            'following': {
-                'remaining': self.rate_limits['following']['remaining'],
-                'limit': self.rate_limits['following']['limit'],
-                'reset_time': self.rate_limits['following']['reset']
-            },
             'unfollow': {
                 'remaining': self.rate_limits['unfollow']['remaining'],
                 'limit': self.rate_limits['unfollow']['limit'],
                 'reset_time': self.rate_limits['unfollow']['reset']
+            },
+            'unfollow_hourly': {
+                'remaining': hourly_remaining,
+                'limit': estimated_hourly,
+                'reset_time': current_time + 3600  # Next hour
+            },
+            'unfollow_daily': {
+                'remaining': daily_remaining,
+                'limit': estimated_daily,
+                'reset_time': current_time + 86400  # Next day
             },
             'user_lookup': {
                 'remaining': self.rate_limits['user_lookup']['remaining'],
@@ -507,3 +602,174 @@ class XAPIClient:
                 'reset_time': self.rate_limits['user_lookup']['reset']
             }
         }
+    
+    def _refresh_rate_limits_from_api(self):
+        """Refresh rate limits by making actual API calls to get current headers."""
+        try:
+            logging.info("Refreshing rate limits from X API...")
+            
+            # Make a lightweight API call to get fresh rate limit headers
+            # Use the user lookup endpoint as it's typically available and reliable
+            response = self._make_api_request('GET', '/users/me', api_endpoint_type='user_lookup')
+            
+            if response and hasattr(response, 'headers'):
+                self._update_rate_limit(response, 'user_lookup')
+                
+                # Get rate limit info from headers
+                remaining = response.headers.get('x-rate-limit-remaining')
+                limit = response.headers.get('x-rate-limit-limit')
+                reset = response.headers.get('x-rate-limit-reset')
+                
+                if remaining and limit:
+                    logging.info(f"Fresh rate limit from API headers - Remaining: {remaining}/{limit}, Reset: {reset}")
+                    
+                    # For unfollow limits, we need to estimate based on X API documentation
+                    # X API v2 typically allows 50 unfollow requests per 15-minute window
+                    current_time = time.time()
+                    
+                    # Check if we need to reset the unfollow window
+                    if self.rate_limits['unfollow']['reset'] < current_time:
+                        # Reset window has passed, refresh unfollow limits
+                        self.rate_limits['unfollow']['remaining'] = 50
+                        self.rate_limits['unfollow']['reset'] = current_time + (15 * 60)  # 15 minutes from now
+                        logging.info("Reset unfollow rate limit window: 50/50 remaining")
+                    
+                    # Update other endpoints based on their specific limits
+                    if int(limit) == 300:  # User lookup endpoint
+                        self.rate_limits['user_lookup']['remaining'] = int(remaining)
+                        self.rate_limits['user_lookup']['limit'] = int(limit)
+                        if reset:
+                            self.rate_limits['user_lookup']['reset'] = int(reset)
+                    
+                else:
+                    logging.warning("No rate limit headers found in API response")
+                    
+            else:
+                logging.warning("Could not get API response for rate limit refresh")
+                
+        except Exception as e:
+            logging.error(f"Error refreshing rate limits from API: {str(e)}")
+            # Log error and continue with current rate limits
+            logging.warning("Could not refresh rate limits from API, using existing values")
+    
+    def discover_account_rate_limits(self):
+        """
+        Discover the actual rate limits for this account by making test API calls.
+        This helps adapt to different account tiers and restrictions.
+        """
+        discovered_limits = {}
+        
+        try:
+            logging.info("🔍 Discovering account rate limits...")
+            
+            # Test different endpoints to discover their limits
+            test_endpoints = [
+                ('user_lookup', 'GET', '/users/me'),
+                ('unfollow', 'DELETE', '/users/{user_id}/following/{target_user_id}'),  # We'll simulate this
+            ]
+            
+            for endpoint_name, method, path in test_endpoints:
+                try:
+                    if endpoint_name == 'user_lookup':
+                        # Make actual user lookup call
+                        response = self._make_api_request(method, path, api_endpoint_type=endpoint_name)
+                        
+                        if response and hasattr(response, 'headers'):
+                            remaining = response.headers.get('x-rate-limit-remaining')
+                            limit = response.headers.get('x-rate-limit-limit')
+                            reset = response.headers.get('x-rate-limit-reset')
+                            
+                            if remaining and limit:
+                                discovered_limits[endpoint_name] = {
+                                    'remaining': int(remaining),
+                                    'limit': int(limit),
+                                    'reset': int(reset) if reset else 0,
+                                    'window_minutes': 15  # X API standard
+                                }
+                                logging.info(f"✅ Discovered {endpoint_name}: {remaining}/{limit}")
+                    
+                    elif endpoint_name == 'unfollow':
+                        # For unfollow, we can only discover limits when we actually unfollow
+                        # Check if we have existing data from previous unfollows
+                        if self.rate_limits[endpoint_name]['limit'] != 'unknown':
+                            discovered_limits[endpoint_name] = {
+                                'remaining': self.rate_limits[endpoint_name]['remaining'],
+                                'limit': self.rate_limits[endpoint_name]['limit'],
+                                'reset': self.rate_limits[endpoint_name]['reset'],
+                                'window_minutes': 15
+                            }
+                            logging.info(f"✅ Using known {endpoint_name}: {discovered_limits[endpoint_name]['remaining']}/{discovered_limits[endpoint_name]['limit']}")
+                        else:
+                            logging.info(f"⏳ {endpoint_name} limits unknown - will be discovered on first unfollow")
+                
+                except Exception as e:
+                    logging.error(f"❌ Error testing {endpoint_name}: {str(e)}")
+            
+            # Update our internal rate limits with discovered data
+            for endpoint_name, limits in discovered_limits.items():
+                if endpoint_name in self.rate_limits:
+                    self.rate_limits[endpoint_name].update(limits)
+            
+            # Log summary
+            logging.info("📋 Account Rate Limit Discovery Results:")
+            for endpoint_name, limits in discovered_limits.items():
+                logging.info(f"   {endpoint_name}: {limits['remaining']}/{limits['limit']} per {limits['window_minutes']} min")
+            
+            return discovered_limits
+            
+        except Exception as e:
+            logging.error(f"Error discovering account rate limits: {str(e)}")
+            return {}
+    
+    def get_adaptive_rate_limits(self):
+        """
+        Get rate limits that adapt to the account's actual restrictions.
+        Discovers limits if unknown and provides recommendations.
+        """
+        # First, try to discover current limits
+        discovered = self.discover_account_rate_limits()
+        
+        # Get current status
+        current_status = self.get_rate_limit_status()
+        
+        # Build adaptive recommendations
+        adaptive_limits = {}
+        
+        for endpoint in ['unfollow', 'user_lookup', 'following']:
+            endpoint_limits = current_status.get(endpoint, {})
+            remaining = endpoint_limits.get('remaining', 'unknown')
+            limit = endpoint_limits.get('limit', 'unknown')
+            reset_time = endpoint_limits.get('reset_time', 0)
+            
+            # Calculate time until reset
+            current_time = time.time()
+            time_until_reset = max(0, reset_time - current_time)
+            
+            # Determine optimal strategy based on limits
+            if remaining != 'unknown' and limit != 'unknown':
+                if limit <= 1:
+                    strategy = "Very restrictive - use automated 15-minute intervals"
+                    recommended_delay = 900  # 15 minutes
+                elif limit <= 10:
+                    strategy = "Restrictive - use 5-10 minute intervals"
+                    recommended_delay = 300  # 5 minutes
+                elif limit <= 50:
+                    strategy = "Standard - use 18-second intervals for batches"
+                    recommended_delay = 18  # 18 seconds
+                else:
+                    strategy = "High limit - can use faster intervals"
+                    recommended_delay = 1  # 1 second
+            else:
+                strategy = "Unknown limits - test with single unfollows first"
+                recommended_delay = 60  # 1 minute
+            
+            adaptive_limits[endpoint] = {
+                'current_remaining': remaining,
+                'current_limit': limit,
+                'time_until_reset_minutes': int(time_until_reset / 60),
+                'strategy': strategy,
+                'recommended_delay_seconds': recommended_delay,
+                'is_restrictive': limit != 'unknown' and limit <= 10
+            }
+        
+        return adaptive_limits
